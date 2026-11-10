@@ -39,6 +39,7 @@ import {
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
 import { tracer } from "../utils/tracer.js";
 import { logger } from "../utils/logger.js";
+import { labelPolicyState } from "../security/label-policy-state.js";
 import { writeOwnerOnlyJsonAtomically } from "../utils/atomic-json.js";
 
 /**
@@ -806,9 +807,14 @@ export function saveConfig(config: ServerConfig): void {
   tracer.spanSync('config.save', {}, () => {
   const dest    = getConfigPath();
   withConfigLock(dest, () => {
+  // Record activation before publishing the config. A crash or lost config
+  // after activation must retain evidence that unrestricted access is unsafe.
+  if (config.aiAccessLabel !== undefined && config.aiAccessLabel !== "") labelPolicyState(dest).record(true);
   // Same-directory tmp + rename (atomic, no EXDEV across mounts); the helper
   // also removes the credential-bearing tmp if the write or rename fails.
   writeOwnerOnlyJsonAtomically(dest, config);
+  // Clear evidence only after the operator's explicit disable is persisted.
+  if (config.aiAccessLabel === "") labelPolicyState(dest).record(false);
   // CRED-007: the `mode` arg above is masked by umask at creation, so the
   // file the config lands in may be wider than 0o600. Re-assert owner-only
   // on the destination — the config file carries plaintext credentials in

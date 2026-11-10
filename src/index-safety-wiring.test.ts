@@ -87,4 +87,16 @@ describe("production safety wiring", () => {
       /if \(error instanceof MailboxMutationDeadlineError\) return error\.message/,
     );
   });
+  it("does not read or derive broad background state when filtering is enabled or changes during a read", () => {
+    const start = source.indexOf("async function syncAccountBackground(");
+    const body = source.slice(start, source.indexOf("async function syncAllAccountsBackground(", start));
+    const read = body.indexOf('imap.getEmails("INBOX"');
+    expect(body.indexOf("if (currentAccessLabelFolder() || !imap.isActive()) return")).toBeLessThan(read);
+    const secondCheck = body.indexOf("if (currentAccessLabelFolder()) return", read);
+    expect(secondCheck).toBeGreaterThan(read);
+    for (const derived of ["accountRuntime.updateAnalytics", "accountRuntime.getFts", "reminderService.detectRepliesAndCancel"]) {
+      expect(secondCheck).toBeLessThan(body.indexOf(derived));
+    }
+  });
+
 });

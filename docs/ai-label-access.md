@@ -11,7 +11,10 @@ save. The equivalent top-level config field is:
 Use the label name, without `Labels/`. This is an opt-in restriction: an absent
 or empty setting retains upstream's existing access policy. Configure it before
 connecting agents. Invalid nonempty values or an unreadable config block mail access. Losing the
-config after enabling the policy also blocks access until settings are restored. The same label
+config after enabling the policy also blocks access until settings are restored.
+A private adjacent `.label-policy.json` marker preserves activation across
+restarts. Removing the setting does not disable it; explicitly save an empty
+label (or perform a full configuration reset) to disable filtering. The same label
 name applies to all configured accounts; create it in each account used to send.
 
 With the setting enabled, the MCP keeps its existing folder layout, tool
@@ -23,7 +26,8 @@ The backend intersects each requested mailbox with current access-label
 membership before fetching message bodies, paginating lists, applying search
 limits, downloading attachments, or changing flags. Folder and unread counts
 reflect only visible mail. Analytics use fresh filtered Inbox/Sent data in an
-isolated per-call service rather than the whole-account cache. Tools,
+isolated per-call service rather than the whole-account cache. Unscoped
+background analytics, indexing, and reminder detection are paused while enabled. Tools,
 resources, and prompts all use this backend, including trusted local callers.
 Existing per-agent folder grants still apply and can narrow access further.
 

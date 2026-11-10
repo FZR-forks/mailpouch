@@ -2582,7 +2582,10 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
 async function syncAccountBackground(services: AccountServices): Promise<void> {
   const { imap, spec } = services;
   const accountId = spec.id;
-  if (!imap.isActive()) return;
+  // Filtered requests use live per-call data. Background FTS/reminder work
+  // cannot safely reuse old account-wide derived state while this mode is on.
+  try { if (currentAccessLabelFolder() || !imap.isActive()) return; }
+  catch { return; } // An unreadable policy must not start broad mailbox reads.
 
   // Hold both a runtime generation and the durable mailbox fingerprint while
   // the network read is outstanding. A settings edit can replace this account
@@ -2601,6 +2604,9 @@ async function syncAccountBackground(services: AccountServices): Promise<void> {
       imap.getEmails("INBOX", 50),
       imap.getEmails("Sent", 50),
     ]);
+    // The owner may enable filtering while IMAP is awaiting. Discard before
+    // updating analytics, indexes, or reminders under the previous policy.
+    if (currentAccessLabelFolder()) return;
     let stillCurrent = accountRuntime.isCurrentGeneration(accountId, generation);
     try {
       const current = accountManager.getForAccount(accountId);
