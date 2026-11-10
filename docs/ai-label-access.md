@@ -62,8 +62,13 @@ cross-process write locks, and are bound to the mailbox/transport fingerprint.
 An account repointed to another mailbox cannot process the old queue.
 
 A job retains the label selected when SMTP was attempted, even if settings
-later change. Jobs for SMTP attempts that never appear in Sent remain pending;
-the queue blocks new sends at 10,000 pending records. Inspect the account-owned
+later change. Jobs retry for up to 30 days. Older unconfirmed jobs remain in the
+same file with a `needsAttentionAt` timestamp and a prominent server-log error, and
+stop automatic retries. They do not count against the 10,000 active-job send
+limit. Legacy jobs without `createdAt` get a full retry window on upgrade.
+Restore the destination label and confirm the Sent copy, then either apply the
+label manually or remove `needsAttentionAt` and reset `createdAt` to the current
+Unix time in milliseconds while MailPouch is stopped. Inspect the account-owned
 `.outgoing-labels-<fingerprint>.json` file and server logs to diagnose failures.
 Do not delete pending records for delivered mail until labeling is resolved.
 Once a job completes, manually removing the label revokes access; the worker

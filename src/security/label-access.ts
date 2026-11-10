@@ -2,8 +2,11 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { SearchEmailOptions } from "../types/index.js";
 import type { SimpleIMAPService } from "../services/simple-imap-service.js";
+import { hashArgs, type AgentAuditLog } from "../agents/audit.js";
+import type { CallerContext } from "../agents/caller-context.js";
 import { validateLabelName } from "../utils/helpers.js";
 
+/** Resolve a configured label name; invalid policy values fail closed. */
 export function accessLabelFolder(label: unknown): string | undefined {
   if (label === undefined || label === "") return undefined;
   if (typeof label !== "string" || label !== label.trim() || validateLabelName(label)) {
@@ -44,6 +47,39 @@ export function scopeLabelTool(tool: string, args: Record<string, unknown>, fold
   }
 }
 
+/** Record policy/configuration denials for known callers, then preserve the original MCP error. */
+export function requireLabelToolScope(options: {
+  tool: string;
+  args: Record<string, unknown>;
+  readFolder: () => string | undefined;
+  caller?: CallerContext;
+  audit: Pick<AgentAuditLog, "write">;
+  errorMessage: (error: unknown) => string;
+}): string | undefined {
+  const startedAt = Date.now();
+  try {
+    const folder = options.readFolder();
+    if (folder) scopeLabelTool(options.tool.replace(/^read_surface:/, ""), options.args, folder);
+    return folder;
+  } catch (error) {
+    if (options.caller) {
+      options.audit.write({
+        ts: new Date(startedAt).toISOString(),
+        clientId: options.caller.clientId,
+        clientName: options.caller.clientName,
+        tool: options.tool,
+        argHash: hashArgs(options.args),
+        ok: false,
+        durMs: Date.now() - startedAt,
+        blockedReason: `label policy: ${options.errorMessage(error)}`,
+        ip: options.caller.ip,
+      });
+    }
+    throw error;
+  }
+}
+
+/** Intersect the global label boundary with any narrower per-agent grant. */
 export function labelAllowedFolders(folder: string | undefined, grant?: string[]): string[] | undefined {
   if (!folder) return grant;
   return !grant || grant.includes(folder) ? [folder] : [];

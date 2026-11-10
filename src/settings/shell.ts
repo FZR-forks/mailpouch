@@ -1853,7 +1853,7 @@ ${buildStyles(cspNonce)}
 
   function populatePermissions(c) {
     if (!c) return;
-    document.getElementById('ai-access-label').value = c.aiAccessLabel || '';
+    set('ai-access-label', c.aiAccessLabel || '');
     const perms = c.permissions || {};
     const tools = perms.tools || {};
     document.querySelectorAll('.preset-btn').forEach(b => {
@@ -1996,7 +1996,11 @@ ${buildStyles(cspNonce)}
       }),
     });
     if (r.ok) { toast('Permissions saved. Changes take effect within 15 s.', 'ok'); await refresh(); }
-    else       { toast('Save failed.', 'err'); }
+    else {
+      const result = await r.json().catch(() => null);
+      const reason = typeof result?.error === 'string' && result.error.trim() ? result.error : r.status;
+      toast('Save failed: ' + reason, 'err');
+    }
   }
 
   // ── Status tab ────────────────────────────────────────────────────────────

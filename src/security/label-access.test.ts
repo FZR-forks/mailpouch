@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { accessLabelFolder, scopeLabelTool, labelAllowedFolders, labelScopedImap } from "./label-access.js";
+import { accessLabelFolder, scopeLabelTool, requireLabelToolScope, labelAllowedFolders, labelScopedImap } from "./label-access.js";
 import { SimpleIMAPService } from "../services/simple-imap-service.js";
 import { handlers as reading } from "../tools/reading.js";
 import type { ToolCallContext } from "../tools/types.js";
@@ -96,5 +96,44 @@ describe("global AI label boundary", () => {
     expect(await scoped.getEmailById("42", folder)).toBeNull();
     expect(await scoped.downloadAttachment("42", 0, folder)).toBeNull();
     expect(() => scoped.getEmailById("42", "INBOX")).toThrow();
+  });
+});
+
+
+describe("label policy denial audit", () => {
+  it.each(["get_email_by_id", "read_surface:get_email_by_id"])("records a known caller's %s denial without retaining mail arguments", tool => {
+    const write = vi.fn();
+    const args = { folder: "INBOX", body: "private contents" };
+    expect(() => requireLabelToolScope({
+      tool, args, readFolder: () => folder,
+      caller: { clientId: "test-agent", clientName: "Test agent", ip: "127.0.0.1" },
+      audit: { write }, errorMessage: e => (e as Error).message,
+    })).toThrow("only the configured AI access label");
+    expect(write).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      tool, clientId: "test-agent", ok: false, blockedReason: expect.stringContaining("label policy:"),
+      argHash: expect.any(String), ip: "127.0.0.1",
+    }));
+    expect(JSON.stringify(write.mock.calls)).not.toContain("private contents");
+  });
+  it("audits unreadable configuration and rethrows the exact original error", () => {
+    const error = new Error("Unreadable access policy");
+    const write = vi.fn();
+    let received: unknown;
+    try {
+      requireLabelToolScope({ tool: "send_email", args: {},
+        readFolder: () => { throw error; },
+        caller: { clientId: "agent", clientName: "Agent" },
+        audit: { write }, errorMessage: e => (e as Error).message,
+      });
+    } catch (caught) { received = caught; }
+    expect(received).toBe(error);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+  it("preserves trusted callers without inventing an audit identity", () => {
+    const write = vi.fn();
+    expect(() => requireLabelToolScope({ tool: "get_emails", args: { folder: "INBOX" },
+      readFolder: () => folder, audit: { write }, errorMessage: String,
+    })).toThrow();
+    expect(write).not.toHaveBeenCalled();
   });
 });

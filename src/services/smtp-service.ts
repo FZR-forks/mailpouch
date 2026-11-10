@@ -557,6 +557,8 @@ export class SMTPService {
       const fromAddress = fromOverride && isValidEmail(fromOverride)
         ? fromOverride
         : this.config.smtp.username;
+      if (options.from !== undefined && !isValidEmail(options.from)) throw new Error("Invalid sender address.");
+
       const mailOptions: SendMailOptions = {
         from: options.from ?? fromAddress,
         to: toAddresses.join(", "),
@@ -567,8 +569,6 @@ export class SMTPService {
         text: options.isHtml ? undefined : options.body,
         html: options.isHtml ? options.body : undefined,
       };
-
-      if (options.from !== undefined && !isValidEmail(options.from)) throw new Error("Invalid sender address.");
 
       if (ccAddresses.length > 0) {
         mailOptions.cc = ccAddresses.join(", ");

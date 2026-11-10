@@ -158,3 +158,24 @@ describe("folder-restricted reply and forward", () => {
     expect(setFlag).not.toHaveBeenCalled();
   });
 });
+
+describe("reply-all from an alternate sender", () => {
+  it("excludes both account addresses case-insensitively and keeps other recipients", async () => {
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "<reply@x.com>" });
+    await mod.handlers.reply_to_email(makeCtx({
+      args: { emailId: "42", body: "Thanks", from: "Alternate@x.com", replyAll: true },
+      config: { smtp: { username: "BOB@x.com" } } as ToolCallContext["config"],
+      imapService: {
+        getEmailById: async () => original({
+          to: ["Bob <bob@x.com>", "alternate@x.com", "Carol <carol@x.com>"],
+          cc: ["Alternate <ALTERNATE@x.com>", "Alice <alice@x.com>", "Dan <dan@x.com>"],
+        }),
+        setFlag: vi.fn().mockResolvedValue(true),
+      } as unknown as ToolCallContext["imapService"],
+      smtpService: { sendEmail } as unknown as ToolCallContext["smtpService"],
+    }));
+    expect(sendEmail.mock.calls[0][0]).toMatchObject({
+      from: "Alternate@x.com", to: "alice@x.com", cc: "carol@x.com, dan@x.com",
+    });
+  });
+});

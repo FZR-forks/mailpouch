@@ -163,6 +163,7 @@ export const defs: ToolDef[] = [
   },
 ];
 
+/** Validate an optional account-owned sender before composing outbound mail. */
 function senderAddress(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !isValidEmail(value)) {
@@ -266,11 +267,14 @@ export const handlers: Record<string, ToolHandler> = {
 
     const ccAddresses: string[] = [];
     if (args.replyAll) {
-      const self = (senderAddress(args.from) ?? config.smtp.username).toLowerCase();
+      const selfAddresses = new Set([
+        config.smtp.username.toLowerCase(),
+        (senderAddress(args.from) ?? config.smtp.username).toLowerCase(),
+      ]);
       const addrs = [...(original.to ?? []), ...(original.cc ?? [])];
       for (const a of addrs) {
         const addr = (a.match(/<([^>]+)>/)?.[1] ?? a).trim().toLowerCase();
-        if (addr && addr !== self && addr !== replyToAddress.toLowerCase()) {
+        if (addr && !selfAddresses.has(addr) && addr !== replyToAddress.toLowerCase()) {
           if (isValidEmail(addr)) ccAddresses.push(addr);
         }
       }

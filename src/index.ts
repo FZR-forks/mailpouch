@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { currentAccessLabelFolder } from "./security/label-config.js";
-import { scopeLabelTool, labelAllowedFolders, labelScopedImap } from "./security/label-access.js";
+import { requireLabelToolScope, labelAllowedFolders, labelScopedImap } from "./security/label-access.js";
 
 /**
  * Proton Mail MCP Server
@@ -1022,8 +1022,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     }
   }
 
-  const aiLabelFolder = currentAccessLabelFolder();
-  if (aiLabelFolder) scopeLabelTool(name, args as Record<string, unknown>, aiLabelFolder);
+  const caller = currentCaller() ?? localCaller();
+  const aiLabelFolder = requireLabelToolScope({
+    tool: name, args: args as Record<string, unknown>, caller,
+    readFolder: currentAccessLabelFolder, audit: agentAudit, errorMessage: safeErrorMessage,
+  });
 
   // ── Per-tool account routing ─────────────────────────────────────────────
   // The dispatcher resolves an optional `account_id` argument before the
@@ -1057,7 +1060,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   // per-agent grant: an unapproved one is blocked "pending user approval".
   // When local gating is disabled, localCaller() is undefined and stdio
   // bypasses (legacy auto-trust).
-  const caller = currentCaller() ?? localCaller();
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
@@ -1497,12 +1499,14 @@ function requireReadSurfaceAccess(
   tool: ToolName,
   args: Record<string, unknown> = {},
 ): ActiveReadSurfaceAccess {
-  const labelFolder = currentAccessLabelFolder();
-  if (labelFolder) scopeLabelTool(tool, { ...args }, labelFolder);
+  const caller = currentCaller() ?? localCaller();
+  const labelFolder = requireLabelToolScope({
+    tool: `read_surface:${tool}`, args: { ...args }, caller,
+    readFolder: currentAccessLabelFolder, audit: agentAudit, errorMessage: safeErrorMessage,
+  });
   const services = accountManager.getActive();
   const activeAccountId = services.spec.id;
   const accountIdentity = accountManager.identityForAccount(activeAccountId);
-  const caller = currentCaller() ?? localCaller();
   if (!caller) {
     // Trusted local mode has no per-agent grant, but the global preset still
     // applies — the tool dispatcher enforces it for every caller, and a

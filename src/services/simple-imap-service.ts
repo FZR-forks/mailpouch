@@ -1529,13 +1529,13 @@ export class SimpleIMAPService {
     // GAP 7.5: attachment content is stripped from cache — re-fetch full source on demand
     if (!att.content) {
       logger.debug('Attachment content not in cache, re-fetching full email source', 'IMAPService', { emailId, attachmentIndex });
-      const fresh = await this.fetchEmailFullSource(emailId, emailMeta.folder);
-      let freshAtt = fresh?.attachments?.[idx];
+      const fullSource = await this.fetchEmailFullSource(emailId, emailMeta.folder);
+      let freshAtt = fullSource?.attachments?.[idx];
       // If the indexed attachment doesn't match the name the caller selected,
       // the metadata/parse orderings drifted — re-map by filename so we return
       // the file the caller actually asked for.
       if (wantedName && freshAtt?.filename !== wantedName) {
-        const byName = fresh?.attachments?.find(a => a.filename === wantedName && !!a.content);
+        const byName = fullSource?.attachments?.find(a => a.filename === wantedName && !!a.content);
         if (byName) freshAtt = byName;
       }
       if (!freshAtt?.content) {
