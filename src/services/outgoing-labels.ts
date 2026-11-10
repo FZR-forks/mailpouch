@@ -11,7 +11,8 @@ import { logger } from "../utils/logger.js";
 interface LabelJob { messageId: string; folder: string; createdAt?: number; needsAttentionAt?: number }
 const MAX_JOB_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export interface OutgoingLabeler {
-  prepare(messageId: string): Promise<void>;
+  prepare(messageId: string): Promise<boolean>;
+  discard(messageId: string): void;
   stop(): void;
 }
 
@@ -33,7 +34,7 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
     if (!existsSync(this.path)) return [];
     const jobs: unknown = JSON.parse(readFileSync(this.path, "utf8"));
     if (!Array.isArray(jobs) || !jobs.every(j => j && typeof j.messageId === "string"
-      && /^<[a-f0-9-]+@mailpouch.local>$/.test(j.messageId)
+      && /^<[a-f0-9-]+@[a-zA-Z0-9.-]+>$/.test(j.messageId)
       && typeof j.folder === "string" && accessLabelFolder(j.folder.slice(7)) === j.folder
       && (j.createdAt === undefined || (typeof j.createdAt === "number" && Number.isFinite(j.createdAt) && j.createdAt >= 0))
       && (j.needsAttentionAt === undefined || (typeof j.needsAttentionAt === "number" && Number.isFinite(j.needsAttentionAt) && j.needsAttentionAt >= 0)))) {
@@ -53,9 +54,9 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
   }
 
   /** Preflight the label and durably queue its Message-ID before SMTP dispatch. */
-  async prepare(messageId: string): Promise<void> {
+  async prepare(messageId: string): Promise<boolean> {
     const folder = accessLabelFolder(this.getLabel());
-    if (!folder) return;
+    if (!folder) return false;
     if (this.stopped) throw new Error("Outgoing label queue is retired.");
     await this.connect();
     const folders = await this.imap.syncFolders();
@@ -69,6 +70,12 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
       return [...jobs, { messageId, folder, createdAt: Date.now() }];
     });
     this.start();
+    return true;
+  }
+
+  /** Forget only attempts whose SMTP response definitively rejected delivery. */
+  discard(messageId: string): void {
+    this.update(jobs => jobs.filter(job => job.messageId !== messageId));
   }
 
   /** Reconcile in the background without keeping a shutting-down process alive. */

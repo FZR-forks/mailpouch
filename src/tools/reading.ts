@@ -496,14 +496,14 @@ export const defsLate: ToolDef[] = [
 ];
 
 /**
- * A folder allowlist is meaningful only when it has at least one path. The
+ * An empty effective folder allowlist denies access to every folder. The
  * dispatcher always supplies this accessor in production; the optional call
  * keeps direct handler tests (which intentionally use a tiny context) on the
  * unrestricted compatibility path.
  */
 function callerAllowedFolders(ctx: ToolCallContext): string[] | undefined {
   const allowed = ctx.getCallerAllowedFolders?.();
-  return Array.isArray(allowed) && allowed.length > 0 ? allowed : undefined;
+  return Array.isArray(allowed) ? allowed : undefined;
 }
 
 function folderIsAllowed(folder: string, allowedFolders: string[]): boolean {

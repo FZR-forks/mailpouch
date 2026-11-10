@@ -36,7 +36,7 @@ export function scopeLabelTool(tool: string, args: Record<string, unknown>, fold
   }
   const requested = [args.folder, args.sourceFolder, ...(Array.isArray(args.folders) ? args.folders : []),
     ...(tool === "get_emails_by_label" && typeof args.label === "string" ? [`Labels/${args.label}`] : [])];
-  if (requested.includes(folder)) throw new McpError(ErrorCode.InvalidParams, "Folder not found");
+  if (requested.some(path => typeof path === "string" && path.toLowerCase() === folder.toLowerCase())) throw new McpError(ErrorCode.InvalidParams, "Folder not found");
 }
 
 /** Record policy/configuration denials for known callers, then preserve the original MCP error. */
@@ -73,7 +73,7 @@ export function requireLabelToolScope(options: {
 
 /** Keep existing per-agent folder restrictions; hide the operator-only control mailbox. */
 export function labelAllowedFolders(folder: string | undefined, grant?: string[]): string[] | undefined {
-  return folder && grant ? grant.filter(path => path !== folder) : grant;
+  return folder && grant ? grant.filter(path => path.toLowerCase() !== folder.toLowerCase()) : grant;
 }
 
 /** Keep backend policy and transport details in owner logs, not agent responses. */
@@ -90,7 +90,7 @@ async function mailboxOperation<T>(operation: () => Promise<T>): Promise<T> {
 export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefined): SimpleIMAPService {
   if (!folder) return imap;
   const normalize = (path: string) => path.toUpperCase() === "INBOX" ? "INBOX" : path;
-  const rawFolders = async () => (await imap.syncFolders()).filter(f => f.path !== folder);
+  const rawFolders = async () => (await imap.syncFolders()).filter(f => f.path.toLowerCase() !== folder.toLowerCase());
   const scopeFor = async (path: string) => {
     const normalized = normalize(path);
     if (!(await rawFolders()).some(entry => entry.path === normalized)) {
@@ -104,7 +104,7 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
       .filter(([key]) => !/^x-pm-.*label/i.test(key))) } : {}),
   });
   const resolve = async (id: string, path?: string): Promise<{ email: EmailMessage; scope: MailboxUidScope } | null> => {
-    if (path === folder) return null;
+    if (path?.toLowerCase() === folder.toLowerCase()) return null;
     const paths = path ? [normalize(path)] : (await rawFolders()).map(f => f.path);
     for (const source of paths) {
       const scope = await scopeFor(source);

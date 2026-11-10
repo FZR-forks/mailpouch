@@ -62,7 +62,8 @@ SMTP validates whether the authenticated account may use that sender.
 `account_id` still selects the account/credentials.
 
 Before delivery, MailPouch checks that the label exists and saves a labeling
-job with a server-generated Message-ID. If either step fails, SMTP is not
+job with a server-generated Message-ID using the sender's domain. When the
+filter is disabled, Nodemailer's normal Message-ID generation is preserved. If either step fails, SMTP is not
 called. After SMTP, the label worker finds the exact Message-ID in the
 server-reported Sent mailbox and applies the label via IMAP COPY, preserving
 Sent membership. It verifies label membership before removing the job.
@@ -72,7 +73,8 @@ send result. The Sent copy becomes visible after background labeling finishes;
 no labeling status or special follow-up action is exposed to the agent.
 The worker checks every 10 seconds and retries labeling across Bridge outages,
 delayed Sent synchronization, and process restarts. Label retries never resend
-email. MailPouch must remain running for queued labeling and scheduled delivery.
+email. Definitively rejected SMTP attempts discard their labeling jobs;
+ambiguous deliveries retain them for reconciliation. MailPouch must remain running for queued labeling and scheduled delivery.
 Queues are stored next to the selected config, use private file permissions and
 cross-process write locks, and are bound to the mailbox/transport fingerprint.
 An account repointed to another mailbox cannot process the old queue.

@@ -102,12 +102,14 @@ export interface ToolCallContext {
    *  - Returns `undefined` for trusted/stdio callers, missing grants, or
    *    grants without a folder restriction → tools should treat as
    *    "no restriction" and preserve existing behavior.
-   *  - Returns a non-empty `string[]` when the grant restricts the caller
-   *    to a specific set of folders → folder-bearing tools (e.g.,
+   *  - Returns `string[]` when the grant restricts the caller to specific
+   *    folders. An empty effective array is deny-all, never unrestricted.
+   *    Folder-bearing tools (e.g.,
    *    `fts_search`) must scope their results to that set.
    * The grant gate in `index.ts` already blocks per-call `folder` args
    * outside the allowlist; this accessor is for tools whose response
-   * content (not args) is folder-bearing.
+   * content (not args) is folder-bearing. The backend mail filter applies
+   * independently even when this accessor returns `undefined`.
    */
   getCallerAllowedFolders: () => string[] | undefined;
 

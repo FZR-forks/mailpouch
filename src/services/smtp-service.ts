@@ -544,6 +544,7 @@ export class SMTPService {
     }
 
     let dispatchedTransportGeneration: number | undefined;
+    let queuedMessageId: string | undefined;
     try {
       // Real Proton Bridge always uses a full email as the SMTP username
       // (e.g. "chuck@protonmail.com"), so `from: username` is a valid address.
@@ -640,8 +641,14 @@ export class SMTPService {
       // Persist the exact ID before SMTP, including ambiguous deliveries. Queue
       // persistence or missing-label failures must stop delivery at this point.
       if (this.outgoingLabels) {
-        mailOptions.messageId = `<${randomUUID()}@mailpouch.local>`;
-        try { await this.outgoingLabels.prepare(mailOptions.messageId); }
+        const domain = /@([a-zA-Z0-9.-]+)$/.exec(String(mailOptions.from))?.[1] ?? "mailpouch.local";
+        const candidateId = `<${randomUUID()}@${domain}>`;
+        try {
+          if (await this.outgoingLabels.prepare(candidateId)) {
+            queuedMessageId = candidateId;
+            mailOptions.messageId = candidateId;
+          }
+        }
         catch (error) {
           if (error instanceof MailboxMutationDeadlineError) throw error;
           logger.error("Outgoing mail preparation failed", "SMTPService", error);
@@ -687,6 +694,12 @@ export class SMTPService {
           true,
           error,
         );
+      }
+      const responseCode = error && typeof error === "object" ? (error as { responseCode?: unknown }).responseCode : undefined;
+      if (queuedMessageId && dispatchedTransportGeneration === this.transportGeneration
+          && typeof responseCode === "number" && responseCode >= 400 && responseCode <= 599) {
+        try { this.outgoingLabels!.discard(queuedMessageId); }
+        catch (cleanupError) { logger.warn("Could not discard rejected send's labeling job", "SMTPService", cleanupError); }
       }
       if (isTransientAbuseError(error)) {
         this.backoff.record("abuse");

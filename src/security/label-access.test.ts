@@ -227,3 +227,13 @@ describe("mailbox policy denial audit", () => {
     expect(write).toHaveBeenCalledTimes(1);
   });
 });
+
+it("keeps an empty effective folder allowlist deny-all instead of treating it as unrestricted", async () => {
+  const getEmails = vi.fn();
+  await expect(reading.get_emails({
+    args: { folder: "INBOX" }, imapService: { getEmails }, limits: { maxEmailListResults: 50 },
+    getCallerAllowedFolders: () => labelAllowedFolders(folder, [folder]),
+  } as unknown as ToolCallContext)).rejects.toThrow("outside this agent's folder allowlist");
+  expect(getEmails).not.toHaveBeenCalled();
+  expect(() => scopeLabelTool("get_emails", { folder: "labels/ai-accessible" }, folder)).toThrow("Folder not found");
+});

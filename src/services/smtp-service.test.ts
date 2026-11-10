@@ -717,10 +717,11 @@ describe("SMTPService.sendEmail optional fields", () => {
 describe("SMTP automatic access labels", () => {
   it("persists a server-generated Message-ID before dispatch, including alternate senders", async () => {
     const prepare = vi.fn(async (id: string) => {
-      expect(id).toMatch(/^<[a-f0-9-]+@mailpouch.local>$/);
+      expect(id).toMatch(/^<[a-f0-9-]+@example.com>$/);
       expect(sendMailMock).not.toHaveBeenCalled();
+      return true;
     });
-    const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn() });
+    const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn(), discard: vi.fn() });
     const result = await svc.sendEmail({ from: "alternate@example.com", to: "a@b.com", subject: "Hi", body: "Body", headers: { "Message-ID": "<override@x>" } });
     expect(result.success).toBe(true);
     expect(sendMailMock.mock.calls[0][0]).toMatchObject({ from: "alternate@example.com", messageId: prepare.mock.calls[0][0] });
@@ -729,15 +730,15 @@ describe("SMTP automatic access labels", () => {
   });
   it("stops before SMTP if label preflight or persistence fails", async () => {
     const svc = new SMTPService(makeConfig(), {
-      prepare: vi.fn().mockRejectedValue(new Error("Label does not exist")), stop: vi.fn(),
+      prepare: vi.fn().mockRejectedValue(new Error("Label does not exist")), stop: vi.fn(), discard: vi.fn(),
     });
     await expect(svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" })).resolves.toMatchObject({ success: false, error: "Mailbox unavailable. Ask the account owner to check mail settings." });
     expect(sendMailMock).not.toHaveBeenCalled();
     await svc.close();
   });
   it("retains the queued identity after an ambiguous SMTP failure without retrying SMTP", async () => {
-    const prepare = vi.fn().mockResolvedValue(undefined);
-    const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn() });
+    const prepare = vi.fn().mockResolvedValue(true);
+    const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn(), discard: vi.fn() });
     sendMailMock.mockRejectedValueOnce(new Error("socket closed after DATA"));
     await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });
     expect(prepare).toHaveBeenCalledTimes(1);
@@ -752,8 +753,8 @@ it("scheduled delivery uses the same labeling preflight and alternate sender", a
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "mailpouch-scheduled-label-"));
-  const prepare = vi.fn().mockResolvedValue(undefined);
-  const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn() });
+  const prepare = vi.fn().mockResolvedValue(true);
+  const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn(), discard: vi.fn() });
   vi.useFakeTimers();
   try {
     const scheduler = new SchedulerService(svc, join(dir, "schedule.json"), {
@@ -771,4 +772,41 @@ it("scheduled delivery uses the same labeling preflight and alternate sender", a
     await svc.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("label queue delivery outcome handling", () => {
+  it("preserves normal Message-ID generation when labeling is disabled", async () => {
+    const svc = new SMTPService(makeConfig(), { prepare: vi.fn().mockResolvedValue(false), stop: vi.fn(), discard: vi.fn() });
+    await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });
+    expect(sendMailMock.mock.calls[0][0]).not.toHaveProperty("messageId");
+    await svc.close();
+  });
+  it.each([450, 550])("discards an attempt definitively rejected with SMTP %s", async responseCode => {
+    const prepare = vi.fn().mockResolvedValue(true);
+    const discard = vi.fn();
+    const svc = new SMTPService(makeConfig(), { prepare, discard, stop: vi.fn() });
+    sendMailMock.mockRejectedValueOnce(Object.assign(new Error("SMTP rejection"), { responseCode }));
+    await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });
+    expect(discard).toHaveBeenCalledExactlyOnceWith(prepare.mock.calls[0][0]);
+    await svc.close();
+  });
+  it("retains jobs on ambiguous transport errors", async () => {
+    const discard = vi.fn();
+    const svc = new SMTPService(makeConfig(), { prepare: vi.fn().mockResolvedValue(true), discard, stop: vi.fn() });
+    sendMailMock.mockRejectedValueOnce(new Error("socket closed after DATA"));
+    await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });
+    expect(discard).not.toHaveBeenCalled();
+    await svc.close();
+  });
+  it("retains jobs if the transport retired even when the rejection carries a response code", async () => {
+    const discard = vi.fn();
+    const svc = new SMTPService(makeConfig(), { prepare: vi.fn().mockResolvedValue(true), discard, stop: vi.fn() });
+    sendMailMock.mockImplementationOnce(async () => {
+      svc.abortActiveMutationTransport("cancelled");
+      throw Object.assign(new Error("connection retired"), { responseCode: 550 });
+    });
+    await expect(svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" })).rejects.toBeInstanceOf(MailboxMutationDeadlineError);
+    expect(discard).not.toHaveBeenCalled();
+    await svc.close();
+  });
 });

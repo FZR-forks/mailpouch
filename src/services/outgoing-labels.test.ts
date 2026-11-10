@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -132,7 +132,24 @@ describe("outgoing job isolation and age limit", () => {
     writeFileSync(path, JSON.stringify(Array.from({ length: 10_000 }, (_, i) => ({
       messageId: `<${i.toString(16)}@mailpouch.local>`, folder, createdAt: 0, needsAttentionAt: 1,
     }))));
-    await expect(queue.prepare(id)).resolves.toBeUndefined();
+    await expect(queue.prepare(id)).resolves.toBe(true);
     expect(JSON.parse(readFileSync(path, "utf8"))).toHaveLength(10_001);
+  });
+});
+
+
+describe("outgoing label activation and rejected sends", () => {
+  it("reports disabled labeling without creating a durable job", async () => {
+    const { queue, imap } = setup("");
+    expect(await queue.prepare(id)).toBe(false);
+    expect(imap.syncFolders).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(false);
+  });
+  it("discards definitively rejected attempts from persistent state", async () => {
+    const { queue } = setup();
+    expect(await queue.prepare(id)).toBe(true);
+    queue.discard(id);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([]);
+    await queue.processPending();
   });
 });
