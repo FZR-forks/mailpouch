@@ -2,7 +2,7 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { MailboxMutationDeadlineError } from "../services/mailbox-mutation-deadline.js";
 import { logger } from "../utils/logger.js";
-import type { EmailMessage, SearchEmailOptions } from "../types/index.js";
+import type { EmailFolder, EmailMessage, SearchEmailOptions } from "../types/index.js";
 import type { MailboxUidScope, SimpleIMAPService } from "../services/simple-imap-service.js";
 import { hashArgs, type AgentAuditLog } from "../agents/audit.js";
 import type { CallerContext } from "../agents/caller-context.js";
@@ -91,12 +91,18 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
   if (!folder) return imap;
   const normalize = (path: string) => path.toUpperCase() === "INBOX" ? "INBOX" : path;
   const rawFolders = async () => (await imap.syncFolders()).filter(f => f.path.toLowerCase() !== folder.toLowerCase());
-  const scopeFor = async (path: string) => {
-    const normalized = normalize(path);
-    if (!(await rawFolders()).some(entry => entry.path === normalized)) {
+  const scopesFor = async function* (paths?: string[], entries?: EmailFolder[]): AsyncGenerator<MailboxUidScope> {
+    const available = entries ?? await rawFolders();
+    const availablePaths = new Set(available.map(entry => entry.path));
+    const requested = paths ? [...new Set(paths.map(normalize))] : [...availablePaths];
+    if (requested.some(path => !availablePaths.has(path))) {
       throw new McpError(ErrorCode.InvalidParams, "Folder not found");
     }
-    return imap.getLabelUidScope(normalized, folder);
+    yield* imap.getLabelUidScopes(requested, folder);
+  };
+  const scopeFor = async (path: string) => {
+    for await (const scope of scopesFor([path])) return scope;
+    throw new McpError(ErrorCode.InvalidParams, "Folder not found");
   };
   const cleanEmail = (email: EmailMessage): EmailMessage => ({
     ...email,
@@ -105,11 +111,9 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
   });
   const resolve = async (id: string, path?: string): Promise<{ email: EmailMessage; scope: MailboxUidScope } | null> => {
     if (path?.toLowerCase() === folder.toLowerCase()) return null;
-    const paths = path ? [normalize(path)] : (await rawFolders()).map(f => f.path);
-    for (const source of paths) {
-      const scope = await scopeFor(source);
+    for await (const scope of scopesFor(path ? [path] : undefined)) {
       if (!scope.uids.includes(id)) continue;
-      const email = await imap.getEmailById(id, source, true, scope);
+      const email = await imap.getEmailById(id, scope.folder, true, scope);
       if (email) return { email: cleanEmail(email), scope };
     }
     return null;
@@ -133,13 +137,11 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
       });
       if (property === "searchEmails") return (options: SearchEmailOptions) => mailboxOperation(async () => {
         const requested = options.folders ?? [options.folder ?? "INBOX"];
-        const paths = (requested[0] === "*" || requested[0]?.toLowerCase() === "all")
-          ? (await rawFolders()).map(f => f.path)
-          : requested.map(normalize);
-        if (!paths.length) return [];
+        const paths = (requested[0] === "*" || requested[0]?.toLowerCase() === "all") ? undefined : requested;
         const scopes = new Map<string, MailboxUidScope>();
-        for (const path of paths) scopes.set(path, await scopeFor(path));
-        return (await target.searchEmails({ ...options, folder: undefined, folders: paths }, true, scopes)).map(cleanEmail);
+        for await (const scope of scopesFor(paths)) scopes.set(scope.folder, scope);
+        if (!scopes.size) return [];
+        return (await target.searchEmails({ ...options, folder: undefined, folders: [...scopes.keys()] }, true, scopes)).map(cleanEmail);
       });
       if (property === "getEmailById") return (id: string, path?: string) => mailboxOperation(async () => (await resolve(id, path))?.email ?? null);
       if (property === "downloadAttachment") return (id: string, index: number, path?: string) => mailboxOperation(async () => {
@@ -148,9 +150,10 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
       });
       if (property === "getFolders" || property === "syncFolders") return () => mailboxOperation(async () => {
         const result = [];
-        for (const entry of await rawFolders()) {
-          const scope = await scopeFor(entry.path);
-          result.push({ ...entry, totalMessages: scope.uids.length, unreadMessages: scope.unread });
+        const entries = await rawFolders();
+        const entriesByPath = new Map(entries.map(entry => [entry.path, entry]));
+        for await (const scope of scopesFor(undefined, entries)) {
+          result.push({ ...entriesByPath.get(scope.folder)!, totalMessages: scope.uids.length, unreadMessages: scope.unread });
         }
         return result;
       });

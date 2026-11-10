@@ -1192,8 +1192,15 @@ export class SimpleIMAPService {
 
   /** Resolve approved messages to their ordinary per-folder UIDs using Bridge's own identity. */
   async getLabelUidScope(folder: string, labelFolder: string): Promise<MailboxUidScope> {
-    this.validateFolderName(folder);
+    for await (const scope of this.getLabelUidScopes([folder], labelFolder)) return scope;
+    throw new Error("Mailbox scope is unavailable");
+  }
+
+  /** Share a fresh label snapshot and folder listing only within this iteration, scanning source folders lazily. */
+  async *getLabelUidScopes(folders: string[], labelFolder: string): AsyncGenerator<MailboxUidScope> {
+    folders.forEach(folder => this.validateFolderName(folder));
     this.validateFolderName(labelFolder);
+    if (!folders.length) return;
     await this.requireReadConnection("read mailbox");
     const identities = async (path: string) => {
       const lock = await this.client!.getMailboxLock(path);
@@ -1220,13 +1227,18 @@ export class SimpleIMAPService {
       } finally { lock.release(); }
     };
     const allowed = new Set((await identities(labelFolder)).entries.map(entry => entry.identity));
-    const folderInfo = (await this.client!.list()).find(entry => entry.path === folder);
-    // Preserve non-selectable hierarchy entries in folder listings with zero
-    // visible messages; they are not message-bearing mailboxes.
-    if (folderInfo?.flags.has("\\Noselect")) return { folder, uidValidity: 0n, uids: [], unread: 0 };
-    const source = await identities(folder);
-    const visible = source.entries.filter(entry => allowed.has(entry.identity));
-    return { folder, uidValidity: source.uidValidity, uids: visible.map(entry => entry.uid), unread: visible.filter(entry => entry.unread).length };
+    const folderInfo = new Map((await this.client!.list()).map(entry => [entry.path, entry]));
+    for (const folder of folders) {
+      // Preserve non-selectable hierarchy entries in folder listings with zero
+      // visible messages; they are not message-bearing mailboxes.
+      if (folderInfo.get(folder)?.flags.has("\\Noselect")) {
+        yield { folder, uidValidity: 0n, uids: [], unread: 0 };
+        continue;
+      }
+      const source = await identities(folder);
+      const visible = source.entries.filter(entry => allowed.has(entry.identity));
+      yield { folder, uidValidity: source.uidValidity, uids: visible.map(entry => entry.uid), unread: visible.filter(entry => entry.unread).length };
+    }
   }
 
   /** Recheck under the held mailbox lock, before any filtered read or write. */

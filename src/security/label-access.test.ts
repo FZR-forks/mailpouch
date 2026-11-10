@@ -169,6 +169,41 @@ describe("transparent backend mail filter", () => {
     expect(JSON.stringify(await reading.list_labels(ctx))).toContain("Work");
     expect(JSON.stringify(await reading.list_labels(ctx))).not.toContain("AI-Accessible");
   });
+  it.each(["getFolders", "syncFolders", "wildcard search", "multi-folder search", "lookup without a folder"])(
+    "lists folders and scans the access label once per %s operation", async operation => {
+      const { view, imap, client, mailboxes, generations, approved } = fixture();
+      // Exercise an account with many labels; folder-listing cost must stay constant.
+      for (let i = 0; i < 30; i++) {
+        const path = `Labels/Other${i}`;
+        mailboxes.set(path, [{ ...approved, uid: String(100 + i) }]);
+        generations.set(path, 1n);
+      }
+      const paths = [...mailboxes.keys()].filter(path => path !== folder);
+      if (operation === "getFolders") expect(await view.getFolders()).toHaveLength(paths.length);
+      else if (operation === "syncFolders") expect(await view.syncFolders()).toHaveLength(paths.length);
+      else if (operation === "wildcard search") await view.searchEmails({ folders: ["*"] });
+      else if (operation === "multi-folder search") await view.searchEmails({ folders: paths });
+      else expect(await view.getEmailById("999")).toBeNull();
+      expect(imap.syncFolders).toHaveBeenCalledTimes(1);
+      expect(client.list).toHaveBeenCalledTimes(1);
+      const scanned = client.getMailboxLock.mock.calls.map(([path]) => path);
+      expect(scanned.filter(path => path === folder)).toHaveLength(1);
+      for (const path of paths) expect(scanned).toContain(path);
+    },
+  );
+  it("stops a folderless lookup at the first approved match without scanning later folders", async () => {
+    const { view, client } = fixture();
+    expect((await view.getEmailById("42"))?.folder).toBe("INBOX");
+    expect(client.getMailboxLock.mock.calls.map(([path]) => path)).toEqual([folder, "INBOX", "INBOX"]);
+  });
+  it("refreshes label membership between multi-folder operations", async () => {
+    const { view, client, mailboxes } = fixture();
+    expect((await view.getFolders()).map(entry => entry.totalMessages)).toEqual([1, 1, 1]);
+    mailboxes.set(folder, []);
+    expect((await view.getFolders()).map(entry => entry.totalMessages)).toEqual([0, 0, 0]);
+    expect(await view.searchEmails({ folders: ["*"] })).toEqual([]);
+    expect(client.getMailboxLock.mock.calls.filter(([path]) => path === folder)).toHaveLength(3);
+  });
   it("allows attachments and flag changes only for approved physical-folder UIDs", async () => {
     const { view, hidden, approved, client } = fixture();
     expect(Buffer.from((await view.downloadAttachment("42", 0, "INBOX"))!.content, "base64").toString()).toContain("Approved attachment");
