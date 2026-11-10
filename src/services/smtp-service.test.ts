@@ -713,3 +713,62 @@ describe("SMTPService.sendEmail optional fields", () => {
     ).rejects.toThrow(/transporter not initialized/);
   });
 });
+
+describe("SMTP automatic access labels", () => {
+  it("persists a server-generated Message-ID before dispatch, including alternate senders", async () => {
+    const prepare = vi.fn(async (id: string) => {
+      expect(id).toMatch(/^<[a-f0-9-]+@mailpouch.local>$/);
+      expect(sendMailMock).not.toHaveBeenCalled();
+    });
+    const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn() });
+    const result = await svc.sendEmail({ from: "alternate@example.com", to: "a@b.com", subject: "Hi", body: "Body", headers: { "Message-ID": "<override@x>" } });
+    expect(result.success).toBe(true);
+    expect(sendMailMock.mock.calls[0][0]).toMatchObject({ from: "alternate@example.com", messageId: prepare.mock.calls[0][0] });
+    expect(sendMailMock.mock.calls[0][0].headers).toBeUndefined();
+    await svc.close();
+  });
+  it("stops before SMTP if label preflight or persistence fails", async () => {
+    const svc = new SMTPService(makeConfig(), {
+      prepare: vi.fn().mockRejectedValue(new Error("Label does not exist")), stop: vi.fn(),
+    });
+    await expect(svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" })).resolves.toMatchObject({ success: false, error: "Label does not exist" });
+    expect(sendMailMock).not.toHaveBeenCalled();
+    await svc.close();
+  });
+  it("retains the queued identity after an ambiguous SMTP failure without retrying SMTP", async () => {
+    const prepare = vi.fn().mockResolvedValue(undefined);
+    const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn() });
+    sendMailMock.mockRejectedValueOnce(new Error("socket closed after DATA"));
+    await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(sendMailMock).toHaveBeenCalledTimes(1);
+    await svc.close();
+  });
+});
+
+it("scheduled delivery uses the same labeling preflight and alternate sender", async () => {
+  const { SchedulerService } = await import("./scheduler.js");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "mailpouch-scheduled-label-"));
+  const prepare = vi.fn().mockResolvedValue(undefined);
+  const svc = new SMTPService(makeConfig(), { prepare, stop: vi.fn() });
+  vi.useFakeTimers();
+  try {
+    const scheduler = new SchedulerService(svc, join(dir, "schedule.json"), {
+      activeAccountId: "primary", resolveAccountIdentity: () => "identity",
+    });
+    const now = Date.now();
+    scheduler.schedule({ from: "alternate@example.com", to: "a@b.com", subject: "Later", body: "Body" }, new Date(now + 120_000), "primary", "identity");
+    vi.setSystemTime(now + 180_000);
+    await scheduler.processDue();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(sendMailMock).toHaveBeenCalledWith(expect.objectContaining({ from: "alternate@example.com", messageId: prepare.mock.calls[0][0] }));
+    expect(scheduler.list("primary")[0].status).toBe("sent");
+  } finally {
+    vi.useRealTimers();
+    await svc.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

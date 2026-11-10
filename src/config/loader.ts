@@ -436,6 +436,8 @@ export function loadConfig(): ServerConfig | null {
 
     const result: ServerConfig = {
       configVersion: CONFIG_VERSION,
+      // Preserve malformed values so the access boundary fails closed.
+      aiAccessLabel: parsed.aiAccessLabel,
       configResetGeneration: preservedConfigResetGeneration,
       connection: mergedConnection,
       permissions: {

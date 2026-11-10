@@ -1184,7 +1184,7 @@ export class SimpleIMAPService {
    * @param emailId Numeric UID string (e.g. "12345")
    * @returns The EmailMessage, or null if not found
    */
-  async getEmailById(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
+  async getEmailById(emailId: string, folderHint?: string, fresh = false): Promise<EmailMessage | null> {
     this.validateEmailId(emailId);
     // VALID-001 from the 2026-05-28 audit: callers (six tool handlers)
     // forward args.folder raw via `as string | undefined`. Validate here so
@@ -1199,7 +1199,7 @@ export class SimpleIMAPService {
     const cachedEntry = folderHint
       ? this.getCacheEntry(emailId, folderHint)
       : this.findCacheEntryByUid(emailId);
-    if (cachedEntry) {
+    if (cachedEntry && !fresh) {
       tags.hasAttachments = !!(cachedEntry.attachments?.length);
       tags.attachmentCount = cachedEntry.attachments?.length ?? 0;
       return cachedEntry;
@@ -1276,7 +1276,7 @@ export class SimpleIMAPService {
    * Search a single folder — extracted so multi-folder search can call it per folder.
    * Caller is responsible for ensuring the IMAP client is connected.
    */
-  private async searchSingleFolder(folder: string, options: SearchEmailOptions, limit: number): Promise<EmailMessage[]> {
+  private async searchSingleFolder(folder: string, options: SearchEmailOptions, limit: number, fresh = false): Promise<EmailMessage[]> {
     if (!this.client) return [];
     // Defensive: searchEmails validates folders, but this is private and could be
     // reached by a future caller — a bad name must fail clearly, not via a cryptic
@@ -1314,7 +1314,7 @@ export class SimpleIMAPService {
 
         // Serve from cache when possible (folder-qualified to prevent cross-folder collisions)
         const cached = this.getCacheEntry(uidStr, folder);
-        if (cached) {
+        if (cached && !fresh) {
           results.push({
             ...cached,
             body: truncateBody(cached.body),
@@ -1367,7 +1367,7 @@ export class SimpleIMAPService {
    * @param options Search filters (from, to, subject, dateFrom, dateTo, isRead, isStarred, folders)
    * @returns Array of matching EmailMessage objects, up to the configured per-folder limit
    */
-  async searchEmails(options: SearchEmailOptions): Promise<EmailMessage[]> {
+  async searchEmails(options: SearchEmailOptions, fresh = false): Promise<EmailMessage[]> {
     const tags: SpanTags = {
       folder: options.folder || 'INBOX',
       hasSubjectFilter: !!options.subject,
@@ -1429,7 +1429,7 @@ export class SimpleIMAPService {
       if (foldersToSearch.length === 1) {
         // Fast path: no merging needed. Filter BEFORE the limit slice so an
         // attachment filter can't silently under-return.
-        const results = await this.searchSingleFolder(foldersToSearch[0], options, perFolderLimit);
+        const results = await this.searchSingleFolder(foldersToSearch[0], options, perFolderLimit, fresh);
         const filtered = applyAttachmentFilter(results).slice(0, limit);
         tags.resultCount = filtered.length;
         logger.info(`Search found ${filtered.length} emails`, 'IMAPService');
@@ -1438,7 +1438,7 @@ export class SimpleIMAPService {
 
       // Multi-folder: search each, merge, sort by date desc, filter, then limit.
       const settled = await Promise.allSettled(
-        foldersToSearch.map(f => this.searchSingleFolder(f, options, perFolderLimit))
+        foldersToSearch.map(f => this.searchSingleFolder(f, options, perFolderLimit, fresh))
       );
 
       const merged: EmailMessage[] = [];
@@ -1473,7 +1473,7 @@ export class SimpleIMAPService {
    *
    * Returns null if the email or attachment index is not found.
    */
-  async downloadAttachment(emailId: string, attachmentIndex: number, folderHint?: string): Promise<{
+  async downloadAttachment(emailId: string, attachmentIndex: number, folderHint?: string, fresh = false): Promise<{
     filename: string;
     contentType: string;
     size: number;
@@ -1489,9 +1489,10 @@ export class SimpleIMAPService {
     // UIDs are mailbox-local. A caller that knows the source folder must get
     // the exact folder-qualified cache entry rather than whichever same-UID
     // message happens to have been cached first in another folder.
-    let emailMeta: EmailMessage | null | undefined = folderHint
+    let emailMeta: EmailMessage | null | undefined = fresh ? await this.getEmailById(emailId, folderHint, true) : folderHint
       ? this.getCacheEntry(emailId, folderHint)
       : this.findCacheEntryByUid(emailId);
+    if (fresh && !emailMeta) return null;
     if (!emailMeta) {
       emailMeta = await this.getEmailById(emailId, folderHint);
     }

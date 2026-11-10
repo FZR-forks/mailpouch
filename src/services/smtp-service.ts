@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { OutgoingLabeler } from "./outgoing-labels.js";
 /**
  * SMTP Service for sending emails via Proton Mail (through Proton Bridge or
  * direct submission).
@@ -86,7 +88,7 @@ export function escapeHtml(str: string): string {
 }
 
 /** Header keys that must never be overridden via caller-supplied headers */
-const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender)$/i;
+const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender|message-id)$/i;
 
 // Attachment count/size caps live in helpers.ts (validateAttachmentLimits),
 // shared with the IMAP saveDraft path.
@@ -121,7 +123,7 @@ export class SMTPService {
    */
   readonly backoff = new BackoffTracker();
 
-  constructor(config: ProtonMailConfig) {
+  constructor(config: ProtonMailConfig, private readonly outgoingLabels?: OutgoingLabeler) {
     this.config = config;
     this.initializeTransporter();
   }
@@ -556,7 +558,7 @@ export class SMTPService {
         ? fromOverride
         : this.config.smtp.username;
       const mailOptions: SendMailOptions = {
-        from: fromAddress,
+        from: options.from ?? fromAddress,
         to: toAddresses.join(", "),
         // Strip CRLF/NUL to prevent header injection via a crafted subject line.
         // reply_to_email already strips these from fetched subjects; this covers
@@ -565,6 +567,8 @@ export class SMTPService {
         text: options.isHtml ? undefined : options.body,
         html: options.isHtml ? options.body : undefined,
       };
+
+      if (options.from !== undefined && !isValidEmail(options.from)) throw new Error("Invalid sender address.");
 
       if (ccAddresses.length > 0) {
         mailOptions.cc = ccAddresses.join(", ");
@@ -633,6 +637,13 @@ export class SMTPService {
       // this closure and hard-closes the captured transport's active socket.
       const transporter = this.transporter;
       if (!transporter) throw new Error("SMTP transporter not initialized");
+      // Persist the exact ID before SMTP, including ambiguous deliveries. Queue
+      // persistence or missing-label failures must stop delivery at this point.
+      if (this.outgoingLabels) {
+        mailOptions.messageId = `<${randomUUID()}@mailpouch.local>`;
+        await this.outgoingLabels.prepare(mailOptions.messageId);
+      }
+      if (transporter !== this.transporter) throw new Error("SMTP transport changed before delivery; retry the call.");
       dispatchedTransportGeneration = this.transportGeneration;
       const info = await runAccountMailMutation(
         this,
@@ -732,6 +743,7 @@ export class SMTPService {
 
   /** Close and release the SMTP transporter connection pool. */
   async close(): Promise<void> {
+    this.outgoingLabels?.stop();
     return tracer.span('smtp.close', {}, async () => {
     const hadAuthority = this.transporter !== null
       || this.smtpSockets.size > 0
@@ -767,6 +779,7 @@ export class SMTPService {
 
   /** Securely wipe credential strings from memory. */
   wipeCredentials(): void {
+    this.outgoingLabels?.stop();
     const retired = this.hardRetireTransport("credential wipe");
     if (this.config?.smtp) {
       if (this.config.smtp.password) this.config.smtp.password = "";

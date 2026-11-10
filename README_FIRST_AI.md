@@ -229,3 +229,12 @@ tool (`get_email_by_id` / `get_folders`).
 ---
 
 *This file is intended for AI agents. The human-facing documentation is in README.md.*
+
+## AI label access mode
+
+When `aiAccessLabel` is configured, all mail reads default to that Proton label
+and explicit other folders are blocked, including for trusted local callers.
+Use UIDs returned from that label. Sent mail is automatically labeled through a
+durable queue; SMTP success does not mean labeling has completed. Unscoped
+analytics, FTS, logs, drafts, local history/list/cancel, and mailbox administration
+are unavailable in this mode. See [details](docs/ai-label-access.md).

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { currentAccessLabelFolder } from "./security/label-config.js";
+import { scopeLabelTool, labelAllowedFolders, labelScopedImap } from "./security/label-access.js";
 
 /**
  * Proton Mail MCP Server
@@ -827,6 +829,8 @@ const SERVER_INSTRUCTIONS =
   "gated behind a human Approve/Deny. Ask the user to open the settings UI (default http://localhost:8766/#/agents) " +
   "and click Approve, then retry. You cannot approve yourself.\n" +
   "5. When it reports `ready`, call `get_connection_status` to confirm live auth, then use the mail tools.\n\n" +
+  "If AI label access is enabled in Settings, omit folder arguments to use the configured label. " +
+  "Other mailboxes and unscoped tools are blocked even under full permissions. Outgoing labeling is automatic and asynchronous. " +
   "Use `request_permission_escalation` to ask the user for a higher permission preset. " +
   "Full tool reference: README_FIRST_AI.md (https://github.com/chandshy/mailpouch/blob/main/README_FIRST_AI.md), " +
   "also bundled in the installed package.";
@@ -1017,6 +1021,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       throw err;
     }
   }
+
+  const aiLabelFolder = currentAccessLabelFolder();
+  if (aiLabelFolder) scopeLabelTool(name, args as Record<string, unknown>, aiLabelFolder);
 
   // ── Per-tool account routing ─────────────────────────────────────────────
   // The dispatcher resolves an optional `account_id` argument before the
@@ -1277,8 +1284,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
 
   function actionOk(messageId?: string) {
-    const sc = { success: true, ...(messageId ? { messageId } : {}) };
-    return ok(sc, messageId ? `Sent. Message ID: ${messageId}` : "Done.");
+    const sc = { success: true, ...(messageId ? { messageId } : {}), ...(messageId && aiLabelFolder ? { labeling: "queued" } : {}) };
+    return ok(sc, messageId ? `Sent. Message ID: ${messageId}${aiLabelFolder ? ". AI labeling queued; delivery will not be retried for labeling failures." : ""}` : "Done.");
   }
 
   function bulkOk(result: { success: number; failed: number; errors: string[] }) {
@@ -1312,7 +1319,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       args: args as Record<string, unknown>,
       accountId: requestedAccountId,
       accountIdentity: routedAccountIdentity,
-      imapService: routedImapService,
+      imapService: labelScopedImap(routedImapService, aiLabelFolder),
       smtpService: routedSmtpService,
       simpleloginService,
       analyticsService: accountRuntime.getAnalyticsService(requestedAccountId),
@@ -1320,13 +1327,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       reminderService,
       passService,
       getFts: () => accountRuntime.getFts(requestedAccountId, routedAccountIdentity),
-      // Folder-allowlist accessor: trusted/stdio callers (no caller context)
-      // and static-bearer callers fall through to `undefined` (= no
-      // restriction), preserving existing behavior. OAuth callers with a
-      // folder-restricted grant return their allowlist for content-scoping.
+      // The global label boundary also applies to trusted local callers.
+      // Per-agent allowlists may narrow it further, never widen it.
       getCallerAllowedFolders: () => {
-        if (!authorizedGrant) return undefined;
-        return grantManager.resolveAllowedFolders(authorizedGrant);
+        return labelAllowedFolders(aiLabelFolder, authorizedGrant ? grantManager.resolveAllowedFolders(authorizedGrant) : undefined);
       },
       config: configForAccount(routedAccountServices),
       smtpStatus: accountRuntime.getSmtpStatus(requestedAccountId),
@@ -1384,7 +1388,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         ],
       }, invokeHandler)
       : await invokeHandler();
-    if (!isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
+    if (currentAccessLabelFolder() !== aiLabelFolder
+        || !isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
       resultIsError = true;
       logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
         tool: name,
@@ -1393,7 +1398,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       return {
         content: [{
           type: "text" as const,
-          text: "The account changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.",
+          text: "The account or AI access policy changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.",
         }],
         isError: true,
       };
@@ -1458,6 +1463,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
  * remote MCP clients.
  */
 interface ActiveReadSurfaceAccess {
+  labelFolder?: string;
   allowedFolders?: string[];
   accountId: string;
   accountIdentity: string;
@@ -1475,11 +1481,12 @@ async function readFromActiveSurface<T>(
   read: (imap: SimpleIMAPService) => Promise<T>,
 ): Promise<T> {
   const isStillActive = () => accountManager.activeAccountId() === access.accountId
-    && isCurrentAccountRoute(access.accountId, access.accountIdentity, access.services);
+    && isCurrentAccountRoute(access.accountId, access.accountIdentity, access.services)
+    && currentAccessLabelFolder() === access.labelFolder;
   if (!isStillActive()) {
     throw new McpError(ErrorCode.InvalidRequest, "The active account changed before this read could start. Retry after the switch completes.");
   }
-  const result = await read(access.services.imap);
+  const result = await read(labelScopedImap(access.services.imap, access.labelFolder));
   if (!isStillActive()) {
     throw new McpError(ErrorCode.InvalidRequest, "The active account changed while this read was running, so its result was discarded.");
   }
@@ -1490,6 +1497,8 @@ function requireReadSurfaceAccess(
   tool: ToolName,
   args: Record<string, unknown> = {},
 ): ActiveReadSurfaceAccess {
+  const labelFolder = currentAccessLabelFolder();
+  if (labelFolder) scopeLabelTool(tool, { ...args }, labelFolder);
   const services = accountManager.getActive();
   const activeAccountId = services.spec.id;
   const accountIdentity = accountManager.identityForAccount(activeAccountId);
@@ -1500,7 +1509,7 @@ function requireReadSurfaceAccess(
     // resource/prompt must not read what the equivalent tool may not.
     const trustedPermission = permissions.check(tool);
     if (!trustedPermission.allowed) throw new McpError(ErrorCode.InvalidRequest, `Blocked: ${trustedPermission.reason}`);
-    return { accountId: activeAccountId, accountIdentity, services };
+    return { accountId: activeAccountId, accountIdentity, services, labelFolder, allowedFolders: labelAllowedFolders(labelFolder) };
   }
 
   const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
@@ -1577,7 +1586,8 @@ function requireReadSurfaceAccess(
   }
 
   return {
-    allowedFolders: reservationGrant ? grantManager.resolveAllowedFolders(reservationGrant) : undefined,
+    labelFolder,
+    allowedFolders: labelAllowedFolders(labelFolder, reservationGrant ? grantManager.resolveAllowedFolders(reservationGrant) : undefined),
     accountId: activeAccountId,
     accountIdentity,
     services,

@@ -22,6 +22,14 @@ export function buildPermissionsHtml(): string {
     </table>
   </div>
 
+  <div class="card">
+    <div class="card-title">AI email access label</div>
+    <div class="card-desc">Restrict every agent to messages with this Proton label. Create the label in Proton first. Sent messages are labeled automatically. Blank disables this restriction. Applies to all accounts; per-agent grants can narrow access further.</div>
+    <label for="ai-access-label">Label name</label>
+    <input id="ai-access-label" type="text" maxlength="255" placeholder="AI-Accessible">
+    <p>Whole-mailbox analytics, local mail history, and unscoped tools are blocked while enabled. Enable Proton sticky labels if incoming replies should inherit access.</p>
+  </div>
+
   <div id="categories"></div>
 
   <div class="actions">

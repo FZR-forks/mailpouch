@@ -80,6 +80,7 @@ export const defs: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
+        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
         to: { type: "string", description: "Recipient address(es), comma-separated" },
         cc: { type: "string", description: "CC addresses, comma-separated" },
         bcc: { type: "string", description: "BCC addresses, comma-separated" },
@@ -110,6 +111,7 @@ export const defs: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
+        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
         emailId: { type: "string", description: "UID of the email to reply to" },
         folder: { type: "string", description: "Folder the original message lives in. Providing this avoids UID collisions across folders." },
         body: { type: "string", description: "Reply body (plain text or HTML)" },
@@ -135,6 +137,7 @@ export const defs: ToolDef[] = [
       properties: {
         emailId: { type: "string", description: "UID of the email to forward" },
         folder: { type: "string", description: "Folder the original message lives in. Providing this avoids UID collisions across folders." },
+        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
         to: { type: "string", description: "Recipient address(es), comma-separated" },
         message: { type: "string", description: "Optional message to prepend before the forwarded content" },
       },
@@ -159,6 +162,14 @@ export const defs: ToolDef[] = [
     outputSchema: ACTION_RESULT_SCHEMA,
   },
 ];
+
+function senderAddress(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isValidEmail(value)) {
+    throw new McpError(ErrorCode.InvalidParams, "'from' must be a valid email address.");
+  }
+  return value;
+}
 
 export const handlers: Record<string, ToolHandler> = {
   send_email: async (ctx) => {
@@ -200,6 +211,7 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
     }
     const result = await smtpService.sendEmail({
+      from: senderAddress(args.from),
       to: args.to as string,
       cc: args.cc as string | undefined,
       bcc: args.bcc as string | undefined,
@@ -211,7 +223,7 @@ export const handlers: Record<string, ToolHandler> = {
       attachments: sanitizeAttachments(args.attachments),
     });
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
+      return { content: [{ type: "text" as const, text: result.error ?? "Email delivery failed" }], isError: true };
     }
     invalidateAnalytics();
     return actionOk(result.messageId);
@@ -254,7 +266,7 @@ export const handlers: Record<string, ToolHandler> = {
 
     const ccAddresses: string[] = [];
     if (args.replyAll) {
-      const self = config.smtp.username.toLowerCase();
+      const self = (senderAddress(args.from) ?? config.smtp.username).toLowerCase();
       const addrs = [...(original.to ?? []), ...(original.cc ?? [])];
       for (const a of addrs) {
         const addr = (a.match(/<([^>]+)>/)?.[1] ?? a).trim().toLowerCase();
@@ -265,17 +277,18 @@ export const handlers: Record<string, ToolHandler> = {
     }
 
     const result = await smtpService.sendEmail({
+      from: senderAddress(args.from),
       to: replyToAddress,
       cc: ccAddresses.length > 0 ? ccAddresses.join(", ") : undefined,
       subject,
       body: args.body as string,
       isHtml: args.isHtml as boolean | undefined,
-      inReplyTo: original.inReplyTo,
-      references: original.references,
+      inReplyTo: original.messageId ?? original.inReplyTo,
+      references: [...(original.references ?? []), ...(original.messageId ? [original.messageId] : [])],
     });
 
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
+      return { content: [{ type: "text" as const, text: result.error ?? "Email delivery failed" }], isError: true };
     }
     if (result.success) {
       // Keep the flag operation in the exact mailbox read above. IMAP UIDs
@@ -337,6 +350,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
 
     const fwdResult = await smtpService.sendEmail({
+      from: senderAddress(args.from),
       to: args.to as string,
       subject: fwdSubject,
       body: fwdBody,
@@ -347,7 +361,7 @@ export const handlers: Record<string, ToolHandler> = {
     });
 
     if (!fwdResult.success) {
-      return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true };
+      return { content: [{ type: "text" as const, text: fwdResult.error ?? "Forward failed" }], isError: true };
     }
     if (fwdResult.success) {
       // Best-effort flag; log (don't fail the send) so a flag-set failure isn't invisible.

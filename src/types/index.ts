@@ -161,6 +161,8 @@ export interface Contact {
 }
 
 export interface SendEmailOptions {
+  /** Proton SMTP verifies this belongs to the authenticated account. */
+  from?: string;
   to: string | string[];
   cc?: string | string[];
   bcc?: string | string[];

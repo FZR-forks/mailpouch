@@ -370,6 +370,8 @@ export interface AccountSpecShape {
 // import; the accounts registry validates the shape on read.
 
 export interface ServerConfig {
+  /** Optional global mail boundary: only Labels/<name> is agent-readable. Empty disables. */
+  aiAccessLabel?: string;
   configVersion: number;
   /**
    * Monotonic epoch changed only by a full configuration reset. Browser

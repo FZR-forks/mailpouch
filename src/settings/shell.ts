@@ -1853,6 +1853,7 @@ ${buildStyles(cspNonce)}
 
   function populatePermissions(c) {
     if (!c) return;
+    document.getElementById('ai-access-label').value = c.aiAccessLabel || '';
     const perms = c.permissions || {};
     const tools = perms.tools || {};
     document.querySelectorAll('.preset-btn').forEach(b => {
@@ -1990,6 +1991,7 @@ ${buildStyles(cspNonce)}
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
       body: JSON.stringify({
         configResetGeneration: cfg?.configResetGeneration ?? 0,
+        aiAccessLabel: document.getElementById('ai-access-label').value,
         permissions: { preset, tools },
       }),
     });

@@ -1,3 +1,4 @@
+import { accessLabelFolder } from "../security/label-access.js";
 /**
  * mailpouch — Settings UI Server
  *
@@ -202,6 +203,7 @@ const SECRET_PLACEHOLDER = "••••••••";
 interface SettingsConfigPatch {
   connection?: Partial<ServerConfig["connection"]>;
   settingsPort?: number;
+  aiAccessLabel?: string;
   requireDestructiveConfirm?: boolean;
   desktopNotificationsEnabled?: boolean;
   surfaceSecurityNotifications?: boolean;
@@ -246,6 +248,7 @@ function applySettingsConfigPatch(current: ServerConfig, patch: SettingsConfigPa
   if (patch.connection) {
     next.connection = { ...next.connection, ...patch.connection };
   }
+  if (patch.aiAccessLabel !== undefined) next.aiAccessLabel = patch.aiAccessLabel;
   if (patch.settingsPort !== undefined) next.settingsPort = patch.settingsPort;
   if (patch.requireDestructiveConfirm !== undefined) next.requireDestructiveConfirm = patch.requireDestructiveConfirm;
   if (patch.desktopNotificationsEnabled !== undefined) next.desktopNotificationsEnabled = patch.desktopNotificationsEnabled;
@@ -1373,6 +1376,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
               ...(clearSimpleloginApiKey ? { clearSimpleloginApiKey: true } : {}),
               ...(clearPassAccessToken ? { clearPassAccessToken: true } : {}),
             };
+          }
+        }
+
+        if (body.aiAccessLabel !== undefined) {
+          try {
+            if (typeof body.aiAccessLabel !== "string") throw new Error("Expected a label name.");
+            accessLabelFolder(body.aiAccessLabel);
+            configPatch.aiAccessLabel = body.aiAccessLabel;
+          } catch {
+            json(res, 400, { error: "Invalid AI access label. Use a label name such as AI-Accessible, or empty to disable." }); return;
           }
         }
 
