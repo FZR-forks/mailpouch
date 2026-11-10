@@ -59,7 +59,10 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
     if (this.stopped) throw new Error("Outgoing label queue is retired.");
     await this.connect();
     const folders = await this.imap.syncFolders();
-    if (!folders.some(f => f.path === folder)) throw new Error("Create the configured AI access label in Proton before sending.");
+    if (!folders.some(f => f.path === folder)) {
+      logger.error("Configured AI access label is missing; create it in Proton before sending", "OutgoingLabels");
+      throw new Error("Mailbox unavailable. Ask the account owner to check mail settings.");
+    }
     if (this.stopped) throw new Error("Outgoing label queue is retired.");
     this.update(jobs => {
       if (jobs.filter(job => job.needsAttentionAt === undefined).length >= 10_000) throw new Error("Outgoing label queue is full; resolve labeling failures before sending.");

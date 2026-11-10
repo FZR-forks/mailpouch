@@ -731,7 +731,7 @@ describe("SMTP automatic access labels", () => {
     const svc = new SMTPService(makeConfig(), {
       prepare: vi.fn().mockRejectedValue(new Error("Label does not exist")), stop: vi.fn(),
     });
-    await expect(svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" })).resolves.toMatchObject({ success: false, error: "Label does not exist" });
+    await expect(svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" })).resolves.toMatchObject({ success: false, error: "Mailbox unavailable. Ask the account owner to check mail settings." });
     expect(sendMailMock).not.toHaveBeenCalled();
     await svc.close();
   });

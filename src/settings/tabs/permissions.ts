@@ -24,10 +24,10 @@ export function buildPermissionsHtml(): string {
 
   <div class="card">
     <div class="card-title">AI email access label</div>
-    <div class="card-desc">Restrict every agent to messages with this Proton label. Create the label in Proton first. Sent messages are labeled automatically. Blank disables this restriction. Applies to all accounts; per-agent grants can narrow access further.</div>
+    <div class="card-desc">Create this label in Proton and use it to approve messages for agents. MailPouch filters the existing folders and tools in the backend; agents do not select or see this access label. Sent messages are labeled automatically. Blank disables the filter. Applies to all accounts.</div>
     <label for="ai-access-label">Label name</label>
     <input id="ai-access-label" type="text" maxlength="255" placeholder="AI-Accessible">
-    <p>Whole-mailbox analytics, local mail history, and unscoped tools are blocked while enabled. Enable Proton sticky labels if incoming replies should inherit access.</p>
+    <p>Full-text indexes, local mail history, and unscoped administration are unavailable while enabled. Enable Proton sticky labels if incoming replies should inherit access.</p>
   </div>
 
   <div id="categories"></div>

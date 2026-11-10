@@ -2,7 +2,7 @@
  * IMAP Service for reading emails via Proton Bridge
  */
 
-import { ImapFlow } from 'imapflow';
+import { ImapFlow, type FetchQueryObject } from 'imapflow';
 import type { Attachment } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { buildEmailMessage, verifyRelocatedMessages, buildSearchCriteria, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
@@ -96,6 +96,14 @@ function requireMoveCapability(capabilities: Map<string, unknown> | undefined): 
   if (!capabilities?.has('MOVE')) {
     throw new Error('IMAP server does not advertise MOVE; refusing to emulate it with COPY + EXPUNGE');
   }
+}
+
+/** A live source-folder UID set, bound to the mailbox generation that produced it. */
+export interface MailboxUidScope {
+  folder: string;
+  uidValidity: bigint;
+  uids: string[];
+  unread: number;
 }
 
 export class SimpleIMAPService {
@@ -1031,7 +1039,7 @@ export class SimpleIMAPService {
    * @param offset Zero-based start index within the folder (default: 0)
    * @returns Array of EmailMessage objects, newest first
    */
-  async getEmails(folder: string = 'INBOX', limit: number = 50, offset: number = 0): Promise<EmailMessage[]> {
+  async getEmails(folder: string = 'INBOX', limit: number = 50, offset: number = 0, scope?: MailboxUidScope): Promise<EmailMessage[]> {
     this.validateFolderName(folder);
     limit = Math.min(Math.max(1, limit ?? 50), 200);
     offset = Math.max(0, offset ?? 0);
@@ -1065,7 +1073,9 @@ export class SimpleIMAPService {
         this.checkAndUpdateUidValidity(folder);
 
         const mailbox = this.client.mailbox;
-        const total = (mailbox && typeof mailbox !== 'boolean' ? mailbox.exists : 0) || 0;
+        this.assertUidScope(scope, folder);
+        const visible = scope?.uids.slice().sort((a, b) => Number(a) - Number(b));
+        const total = visible ? visible.length : (mailbox && typeof mailbox !== 'boolean' ? mailbox.exists : 0) || 0;
 
         // An offset at/beyond the message count is an empty page. This MUST be
         // checked before the Math.max(1,…) clamps below — otherwise start and
@@ -1087,13 +1097,14 @@ export class SimpleIMAPService {
         // GAP 2.4 / 5.1: fetch envelope + bodyStructure + text preview only.
         // Do NOT fetch source: true here — that downloads the full RFC 2822 message
         // including all attachment binaries just to render a 300-char preview.
-        for await (const message of this.client.fetch(`${start}:${end}`, {
-          uid: true,
-          flags: true,
-          envelope: true,
-          bodyStructure: true,
-          bodyParts: ['1'],   // TEXT part only (part 1 of multipart, whole body for simple)
-        })) {
+        const query: FetchQueryObject = {
+          uid: true, flags: true, envelope: true, bodyStructure: true, bodyParts: ['1'],
+        };
+        const stream = visible
+          ? this.client.fetch(visible.slice(start - 1, end).join(","), query, { uid: true })
+          : this.client.fetch(`${start}:${end}`, query);
+        for await (const message of stream) {
+          if (scope && !scope.uids.includes(String(message.uid))) continue;
           try {
             const env = message.envelope;
             if (!env) continue;
@@ -1179,13 +1190,92 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.getEmails')
   }
 
+  /** Resolve approved messages to their ordinary per-folder UIDs using Bridge's own identity. */
+  async getLabelUidScope(folder: string, labelFolder: string): Promise<MailboxUidScope> {
+    this.validateFolderName(folder);
+    this.validateFolderName(labelFolder);
+    await this.requireReadConnection("read mailbox");
+    const identities = async (path: string) => {
+      const lock = await this.client!.getMailboxLock(path);
+      try {
+        const mailbox = this.client!.mailbox;
+        if (!mailbox || typeof mailbox === "boolean" || mailbox.uidValidity === undefined) {
+          throw new Error("Mailbox identity is unavailable");
+        }
+        const entries: Array<{ uid: string; identity: string; unread: boolean }> = [];
+        if (mailbox.exists) {
+          for await (const message of this.client!.fetch("1:*", {
+            uid: true, flags: true, headers: ["x-pm-internal-id"],
+          })) {
+            // Do not authorize by caller-controlled RFC Message-ID: distinct
+            // messages can share it. Bridge overwrites this internal header.
+            const parsed = await simpleParser(message.headers ?? Buffer.alloc(0));
+            const identity = parsed.headers?.get("x-pm-internal-id");
+            if (typeof identity === "string" && identity.trim()) entries.push({
+              uid: String(message.uid), identity: identity.trim(), unread: !message.flags?.has("\\Seen"),
+            });
+          }
+        }
+        return { entries, uidValidity: mailbox.uidValidity };
+      } finally { lock.release(); }
+    };
+    const allowed = new Set((await identities(labelFolder)).entries.map(entry => entry.identity));
+    const folderInfo = (await this.client!.list()).find(entry => entry.path === folder);
+    // Preserve non-selectable hierarchy entries in folder listings with zero
+    // visible messages; they are not message-bearing mailboxes.
+    if (folderInfo?.flags.has("\\Noselect")) return { folder, uidValidity: 0n, uids: [], unread: 0 };
+    const source = await identities(folder);
+    const visible = source.entries.filter(entry => allowed.has(entry.identity));
+    return { folder, uidValidity: source.uidValidity, uids: visible.map(entry => entry.uid), unread: visible.filter(entry => entry.unread).length };
+  }
+
+  /** Recheck under the held mailbox lock, before any filtered read or write. */
+  private assertUidScope(scope: MailboxUidScope | undefined, folder: string): void {
+    if (!scope) return;
+    const mailbox = this.client?.mailbox;
+    if (scope.folder !== folder || !mailbox || typeof mailbox === "boolean"
+        || mailbox.path !== folder || mailbox.uidValidity !== scope.uidValidity) {
+      throw new Error("Mailbox changed during the request; retry the operation");
+    }
+  }
+
+  /** Flag only approved source UIDs, preserving normal per-message and bulk results. */
+  async setScopedFlags(ids: string[], flag: string, value: boolean, scope: MailboxUidScope): Promise<{ success: number; failed: number; errors: string[] }> {
+    ids.forEach(id => this.validateEmailId(id));
+    await this.ensureMutationConnection();
+    const allowed = new Set(scope.uids);
+    let accepted = [...new Set(ids)].filter(id => allowed.has(id));
+    const rejected = [...new Set(ids)].filter(id => !allowed.has(id));
+    const lock = await this.client!.getMailboxLock(scope.folder);
+    try {
+      this.assertUidScope(scope, scope.folder);
+      assertE2EMailboxIdentity(scope.folder, accepted, this.client!.mailbox);
+      const existing = await this.findExistingUidsInLockedFolder(accepted);
+      rejected.push(...accepted.filter(id => !existing.has(id)));
+      accepted = accepted.filter(id => existing.has(id));
+      for (const chunk of chunkUidsForWire(accepted)) {
+        await runMailboxMutation(this, () => {
+          this.assertUidScope(scope, scope.folder);
+          assertE2EMailboxIdentity(scope.folder, chunk.split(","), this.client!.mailbox);
+          return value
+            ? this.client!.messageFlagsAdd(chunk, [flag], { uid: true })
+            : this.client!.messageFlagsRemove(chunk, [flag], { uid: true });
+        }).then(result => requireImapOk(result, "STORE"));
+      }
+      this.clearCacheAll();
+      this.clearFolderCache();
+      return { success: accepted.length, failed: rejected.length, errors: rejected.map(id => `Email ${id} not found`) };
+    } finally { lock.release(); }
+  }
+
   /**
    * Fetch a single email by its IMAP UID. Searches all folders; results are cached.
    * @param emailId Numeric UID string (e.g. "12345")
    * @returns The EmailMessage, or null if not found
    */
-  async getEmailById(emailId: string, folderHint?: string, fresh = false): Promise<EmailMessage | null> {
+  async getEmailById(emailId: string, folderHint?: string, fresh = false, scope?: MailboxUidScope): Promise<EmailMessage | null> {
     this.validateEmailId(emailId);
+    if (scope && !scope.uids.includes(emailId)) return null;
     // VALID-001 from the 2026-05-28 audit: callers (six tool handlers)
     // forward args.folder raw via `as string | undefined`. Validate here so
     // a CRLF/path-traversal/quote-injected folder name can't reach
@@ -1199,7 +1289,7 @@ export class SimpleIMAPService {
     const cachedEntry = folderHint
       ? this.getCacheEntry(emailId, folderHint)
       : this.findCacheEntryByUid(emailId);
-    if (cachedEntry && !fresh) {
+    if (cachedEntry && !fresh && !scope) {
       tags.hasAttachments = !!(cachedEntry.attachments?.length);
       tags.attachmentCount = cachedEntry.attachments?.length ?? 0;
       return cachedEntry;
@@ -1226,6 +1316,7 @@ export class SimpleIMAPService {
         const lock = await this.client!.getMailboxLock(folder.path);
 
         try {
+          this.assertUidScope(scope, folder.path);
           // GAP 7.4: check for UIDVALIDITY changes after opening the mailbox
           this.checkAndUpdateUidValidity(folder.path);
 
@@ -1236,7 +1327,7 @@ export class SimpleIMAPService {
             uid: true,
             source: true
           }, { uid: true })) {
-            if (!message.source) continue;
+            if (!message.source || (scope && String(message.uid) !== emailId)) continue;
             const parsed = await simpleParser(message.source);
 
             const emailMessage = buildEmailMessage(message, parsed, folder.path);
@@ -1276,7 +1367,7 @@ export class SimpleIMAPService {
    * Search a single folder — extracted so multi-folder search can call it per folder.
    * Caller is responsible for ensuring the IMAP client is connected.
    */
-  private async searchSingleFolder(folder: string, options: SearchEmailOptions, limit: number, fresh = false): Promise<EmailMessage[]> {
+  private async searchSingleFolder(folder: string, options: SearchEmailOptions, limit: number, fresh = false, scope?: MailboxUidScope): Promise<EmailMessage[]> {
     if (!this.client) return [];
     // Defensive: searchEmails validates folders, but this is private and could be
     // reached by a future caller — a bad name must fail clearly, not via a cryptic
@@ -1285,27 +1376,24 @@ export class SimpleIMAPService {
     const lock = await this.client.getMailboxLock(folder);
 
     try {
+      this.assertUidScope(scope, folder);
+      if (scope && !scope.uids.length) return [];
       const searchCriteria = buildSearchCriteria(options);
-
-      // Request ESEARCH PARTIAL for the LAST `limit` matches (RFC 9394 negative
-      // range = highest UIDs = newest mail) rather than the full result set. Falls
-      // back transparently to a plain number[] on servers that lack ESEARCH
-      // capability (e.g. older Proton Bridge builds), sliced client-side.
-      const searchResult = await this.client.search(searchCriteria, {
-        uid: true,
-        returnOptions: [{ partial: `-1:-${limit}` }],
-      });
-      const results: EmailMessage[] = [];
-
-      let limitedUids: number[];
-      if (Array.isArray(searchResult)) {
-        limitedUids = (searchResult as number[]).slice(-limit);
-      } else if (searchResult && typeof searchResult === 'object' && 'partial' in searchResult) {
-        const { messages } = (searchResult as { partial: { messages?: string } }).partial;
-        limitedUids = messages ? expandImapSequence(messages) : [];
-      } else {
-        limitedUids = [];
+      const chunks = scope ? chunkUidsForWire(scope.uids) : [undefined];
+      const matched: number[] = [];
+      for (const uid of chunks) {
+        const searchResult = await this.client.search({ ...searchCriteria, ...(uid ? { uid } : {}) }, {
+          uid: true, returnOptions: [{ partial: `-1:-${limit}` }],
+        });
+        if (Array.isArray(searchResult)) matched.push(...searchResult.slice(-limit));
+        else if (searchResult && typeof searchResult === 'object' && 'partial' in searchResult) {
+          const { messages } = (searchResult as { partial: { messages?: string } }).partial;
+          if (messages) matched.push(...expandImapSequence(messages));
+        }
       }
+      const results: EmailMessage[] = [];
+      const limitedUids = [...new Set(matched)].filter(uid => !scope || scope.uids.includes(String(uid)))
+        .sort((a, b) => b - a).slice(0, limit);
 
       // Newest first, matching get_emails.
       limitedUids.sort((a, b) => b - a);
@@ -1314,7 +1402,7 @@ export class SimpleIMAPService {
 
         // Serve from cache when possible (folder-qualified to prevent cross-folder collisions)
         const cached = this.getCacheEntry(uidStr, folder);
-        if (cached && !fresh) {
+        if (cached && !fresh && !scope) {
           results.push({
             ...cached,
             body: truncateBody(cached.body),
@@ -1337,7 +1425,7 @@ export class SimpleIMAPService {
           uid: true,
           source: true,
         }, { uid: true })) {
-          if (!message.source) continue;
+          if (!message.source || (scope && String(message.uid) !== uidStr)) continue;
           const parsed = await simpleParser(message.source);
 
           const emailMessage = buildEmailMessage(message, parsed, folder);
@@ -1367,7 +1455,7 @@ export class SimpleIMAPService {
    * @param options Search filters (from, to, subject, dateFrom, dateTo, isRead, isStarred, folders)
    * @returns Array of matching EmailMessage objects, up to the configured per-folder limit
    */
-  async searchEmails(options: SearchEmailOptions, fresh = false): Promise<EmailMessage[]> {
+  async searchEmails(options: SearchEmailOptions, fresh = false, scopes?: ReadonlyMap<string, MailboxUidScope>): Promise<EmailMessage[]> {
     const tags: SpanTags = {
       folder: options.folder || 'INBOX',
       hasSubjectFilter: !!options.subject,
@@ -1420,16 +1508,17 @@ export class SimpleIMAPService {
       foldersToSearch = [options.folder || 'INBOX'];
     }
 
-    // Validate all folder names before starting
+    // Validate all folder names and require a filter for every queried mailbox.
     for (const f of foldersToSearch) {
       this.validateFolderName(f);
+      if (scopes && !scopes.has(f)) throw new Error("Mailbox scope is unavailable");
     }
 
     try {
       if (foldersToSearch.length === 1) {
         // Fast path: no merging needed. Filter BEFORE the limit slice so an
         // attachment filter can't silently under-return.
-        const results = await this.searchSingleFolder(foldersToSearch[0], options, perFolderLimit, fresh);
+        const results = await this.searchSingleFolder(foldersToSearch[0], options, perFolderLimit, fresh, scopes?.get(foldersToSearch[0]));
         const filtered = applyAttachmentFilter(results).slice(0, limit);
         tags.resultCount = filtered.length;
         logger.info(`Search found ${filtered.length} emails`, 'IMAPService');
@@ -1438,7 +1527,7 @@ export class SimpleIMAPService {
 
       // Multi-folder: search each, merge, sort by date desc, filter, then limit.
       const settled = await Promise.allSettled(
-        foldersToSearch.map(f => this.searchSingleFolder(f, options, perFolderLimit, fresh))
+        foldersToSearch.map(f => this.searchSingleFolder(f, options, perFolderLimit, fresh, scopes?.get(f)))
       );
 
       const merged: EmailMessage[] = [];
@@ -1473,13 +1562,14 @@ export class SimpleIMAPService {
    *
    * Returns null if the email or attachment index is not found.
    */
-  async downloadAttachment(emailId: string, attachmentIndex: number, folderHint?: string, fresh = false): Promise<{
+  async downloadAttachment(emailId: string, attachmentIndex: number, folderHint?: string, fresh = false, scope?: MailboxUidScope): Promise<{
     filename: string;
     contentType: string;
     size: number;
     content: string;
     encoding: "base64";
   } | null> {
+    fresh ||= scope !== undefined;
     this.validateEmailId(emailId);
     if (folderHint !== undefined) this.validateFolderName(folderHint);
     const tags: SpanTags = { emailId, attachmentIndex, folderHint };
@@ -1489,7 +1579,7 @@ export class SimpleIMAPService {
     // UIDs are mailbox-local. A caller that knows the source folder must get
     // the exact folder-qualified cache entry rather than whichever same-UID
     // message happens to have been cached first in another folder.
-    let emailMeta: EmailMessage | null | undefined = fresh ? await this.getEmailById(emailId, folderHint, true) : folderHint
+    let emailMeta: EmailMessage | null | undefined = fresh ? await this.getEmailById(emailId, folderHint, true, scope) : folderHint
       ? this.getCacheEntry(emailId, folderHint)
       : this.findCacheEntryByUid(emailId);
     if (fresh && !emailMeta) return null;
@@ -1529,7 +1619,7 @@ export class SimpleIMAPService {
     // GAP 7.5: attachment content is stripped from cache — re-fetch full source on demand
     if (!att.content) {
       logger.debug('Attachment content not in cache, re-fetching full email source', 'IMAPService', { emailId, attachmentIndex });
-      const fullSource = await this.fetchEmailFullSource(emailId, emailMeta.folder);
+      const fullSource = await this.fetchEmailFullSource(emailId, emailMeta.folder, scope);
       let freshAtt = fullSource?.attachments?.[idx];
       // If the indexed attachment doesn't match the name the caller selected,
       // the metadata/parse orderings drifted — re-map by filename so we return
@@ -1584,19 +1674,21 @@ export class SimpleIMAPService {
    * Used by downloadAttachment() to retrieve attachment binary content on demand
    * when the cache entry has had its attachment content stripped (GAP 7.5).
    */
-  private async fetchEmailFullSource(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
+  private async fetchEmailFullSource(emailId: string, folderHint?: string, scope?: MailboxUidScope): Promise<EmailMessage | null> {
     await this.requireReadConnection(`download attachments for email ${emailId}`);
     try {
       const foldersToSearch = folderHint ? [{ path: folderHint }] : await this.getFolders();
       for (const folder of foldersToSearch) {
         const lock = await this.client!.getMailboxLock(folder.path);
         try {
+          this.assertUidScope(scope, folder.path);
+          if (scope && !scope.uids.includes(emailId)) return null;
           for await (const message of this.client!.fetch(emailId, {
             uid: true,
             flags: true,
             source: true,
           }, { uid: true })) {
-            if (!message.source) continue;
+            if (!message.source || (scope && String(message.uid) !== emailId)) continue;
             const parsed = await simpleParser(message.source);
             const fullBody = parsed.text || parsed.html || '';
             const plainBody = parsed.text || stripHtml(parsed.html || '');

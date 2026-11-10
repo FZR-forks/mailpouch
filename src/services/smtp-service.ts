@@ -641,7 +641,12 @@ export class SMTPService {
       // persistence or missing-label failures must stop delivery at this point.
       if (this.outgoingLabels) {
         mailOptions.messageId = `<${randomUUID()}@mailpouch.local>`;
-        await this.outgoingLabels.prepare(mailOptions.messageId);
+        try { await this.outgoingLabels.prepare(mailOptions.messageId); }
+        catch (error) {
+          if (error instanceof MailboxMutationDeadlineError) throw error;
+          logger.error("Outgoing mail preparation failed", "SMTPService", error);
+          throw new Error("Mailbox unavailable. Ask the account owner to check mail settings.");
+        }
       }
       if (transporter !== this.transporter) throw new Error("SMTP transport changed before delivery; retry the call.");
       dispatchedTransportGeneration = this.transportGeneration;

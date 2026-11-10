@@ -10,7 +10,7 @@ export function createLabelPolicyReader(
   return () => {
     const config = read();
     if (!config) {
-      if (exists() || lastRestrictedFolder) throw new Error("Cannot read AI access policy; mail access is blocked until settings are restored.");
+      if (exists() || lastRestrictedFolder) throw new Error("Mailbox access is blocked until settings are restored.");
       return undefined;
     }
     const folder = accessLabelFolder(config.aiAccessLabel);

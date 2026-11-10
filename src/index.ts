@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { AnalyticsService } from "./services/analytics-service.js";
 import { currentAccessLabelFolder } from "./security/label-config.js";
 import { requireLabelToolScope, labelAllowedFolders, labelScopedImap } from "./security/label-access.js";
 
@@ -829,8 +830,6 @@ const SERVER_INSTRUCTIONS =
   "gated behind a human Approve/Deny. Ask the user to open the settings UI (default http://localhost:8766/#/agents) " +
   "and click Approve, then retry. You cannot approve yourself.\n" +
   "5. When it reports `ready`, call `get_connection_status` to confirm live auth, then use the mail tools.\n\n" +
-  "If AI label access is enabled in Settings, omit folder arguments to use the configured label. " +
-  "Other mailboxes and unscoped tools are blocked even under full permissions. Outgoing labeling is automatic and asynchronous. " +
   "Use `request_permission_escalation` to ask the user for a higher permission preset. " +
   "Full tool reference: README_FIRST_AI.md (https://github.com/chandshy/mailpouch/blob/main/README_FIRST_AI.md), " +
   "also bundled in the installed package.";
@@ -1102,7 +1101,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       auditFailureRecorded = true;
       return {
-        content: [{ type: "text" as const, text: `Blocked by agent grant: ${grantResult.reason}` }],
+        content: [{ type: "text" as const, text: aiLabelFolder && grantResult.reason?.toLowerCase().includes(aiLabelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${grantResult.reason}` }],
         isError: true,
       };
     }
@@ -1237,7 +1236,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       auditFailureRecorded = true;
       return {
-        content: [{ type: "text" as const, text: `Blocked by agent grant: ${reservationResult.reason}` }],
+        content: [{ type: "text" as const, text: aiLabelFolder && reservationResult.reason?.toLowerCase().includes(aiLabelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${reservationResult.reason}` }],
         isError: true,
       };
     }
@@ -1286,8 +1285,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
 
   function actionOk(messageId?: string) {
-    const sc = { success: true, ...(messageId ? { messageId } : {}), ...(messageId && aiLabelFolder ? { labeling: "queued" } : {}) };
-    return ok(sc, messageId ? `Sent. Message ID: ${messageId}${aiLabelFolder ? ". AI labeling queued; delivery will not be retried for labeling failures." : ""}` : "Done.");
+    const sc = { success: true, ...(messageId ? { messageId } : {}) };
+    return ok(sc, messageId ? `Sent. Message ID: ${messageId}` : "Done.");
   }
 
   function bulkOk(result: { success: number; failed: number; errors: string[] }) {
@@ -1317,14 +1316,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (!handler) {
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
+    const scopedImap = labelScopedImap(routedImapService, aiLabelFolder);
+    const scopedAnalytics = aiLabelFolder ? new AnalyticsService() : undefined;
     const ctx: ToolCallContext = {
       args: args as Record<string, unknown>,
       accountId: requestedAccountId,
       accountIdentity: routedAccountIdentity,
-      imapService: labelScopedImap(routedImapService, aiLabelFolder),
+      imapService: scopedImap,
       smtpService: routedSmtpService,
       simpleloginService,
-      analyticsService: accountRuntime.getAnalyticsService(requestedAccountId),
+      analyticsService: scopedAnalytics ?? accountRuntime.getAnalyticsService(requestedAccountId),
       schedulerService,
       reminderService,
       passService,
@@ -1347,7 +1348,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       sendProgress,
       encodeCursor,
       decodeCursor,
-      getAnalyticsEmails: () => getAnalyticsEmailsForAccount(requestedAccountId, routedImapService),
+      getAnalyticsEmails: async () => {
+        if (!scopedAnalytics) return getAnalyticsEmailsForAccount(requestedAccountId, routedImapService);
+        const inbox = await scopedImap.getEmails("INBOX", 200);
+        const sent = await scopedImap.getEmails("Sent", 100);
+        scopedAnalytics.updateEmails(inbox, sent);
+        return { inbox, sent };
+      },
       invalidateAnalytics: () => accountRuntime.invalidateAnalytics(requestedAccountId),
       recordFromEmail,
       launchProtonBridge,
@@ -1540,7 +1547,7 @@ function requireReadSurfaceAccess(
       blockedReason: grantResult.reason,
       ip: caller.ip,
     });
-    throw new McpError(ErrorCode.InvalidRequest, `Blocked by agent grant: ${grantResult.reason}`);
+    throw new McpError(ErrorCode.InvalidRequest, labelFolder && grantResult.reason?.toLowerCase().includes(labelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${grantResult.reason}`);
   }
 
   const permissionResult = permissions.check(tool);
@@ -1586,7 +1593,7 @@ function requireReadSurfaceAccess(
       blockedReason: reservationResult.reason,
       ip: caller.ip,
     });
-    throw new McpError(ErrorCode.InvalidRequest, `Blocked by agent grant: ${reservationResult.reason}`);
+    throw new McpError(ErrorCode.InvalidRequest, labelFolder && reservationResult.reason?.toLowerCase().includes(labelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${reservationResult.reason}`);
   }
 
   return {

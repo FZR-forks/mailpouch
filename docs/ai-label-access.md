@@ -14,29 +14,40 @@ connecting agents. Invalid nonempty values or an unreadable config block mail ac
 config after enabling the policy also blocks access until settings are restored. The same label
 name applies to all configured accounts; create it in each account used to send.
 
-With the setting enabled:
+With the setting enabled, the MCP keeps its existing folder layout, tool
+arguments, physical-folder UIDs, pagination, and normal send results. There is
+no special folder or label for an agent to select. Inbox and Sent still mean
+Inbox and Sent, and secondary labels keep their usual folder paths.
 
-- Every MCP caller, including trusted local stdio clients, is restricted.
-  OAuth approval, tool permissions, and per-agent grants still apply. An
-  escalation or `full` grant cannot override this label boundary.
-- Lists, searches, threads, email reads, attachments, replies, and forwards
-  use only `Labels/AI-Accessible`. Omitted folder arguments default to that
-  path. Explicit other paths, alternate labels, and wildcard searches fail.
-  UIDs are local to the label mailbox: use IDs discovered there, never IDs
-  copied from Inbox or Sent.
-- Label membership is checked using live IMAP reads, including by-ID and
-  attachment requests. Search results bypass cached bodies as well, protecting
-  against UID reuse after a label mailbox rebuild. Manually adding/removing
-  the label takes effect on the next read after Bridge synchronizes with Proton.
-  Changing the configured label during a request discards its result.
-- Folder listings and unread counts expose only the access label. Email
-  resources obey the same restriction. Prompts that require Inbox, Sent, or
-  unqualified email IDs are blocked; prompts with a folder argument can use
-  the access label.
-- Whole-account analytics, FTS (including cached snippets and index stats),
-  logs, drafts, local scheduled/reminder history, label/folder administration,
-  and move/delete tools are blocked. These need additional scoping before they
-  can be exposed safely. New tools default to blocked until reviewed.
+The backend intersects each requested mailbox with current access-label
+membership before fetching message bodies, paginating lists, applying search
+limits, downloading attachments, or changing flags. Folder and unread counts
+reflect only visible mail. Analytics use fresh filtered Inbox/Sent data in an
+isolated per-call service rather than the whole-account cache. Tools,
+resources, and prompts all use this backend, including trusted local callers.
+Existing per-agent folder grants still apply and can narrow access further.
+
+The access label itself is omitted from folder/label listings and agent-facing
+instructions, cursors, and successful send results. Messages keep their normal
+folder names and UIDs. Unlabeled messages resolve as absent. The account owner
+can add/remove messages from the visible set in Proton without restarting
+MailPouch; changes take effect after Bridge synchronizes. A policy change during
+a request discards its result. Policy setup failures surface as an ordinary
+mailbox-unavailable error, with details retained in owner logs.
+
+The cross-folder membership check uses Bridge's generated `X-Pm-Internal-Id`,
+not a sender-controlled RFC Message-ID. Distinct messages sharing a Message-ID
+cannot authorize one another, and a colliding UID in Sent cannot authorize a
+message in Inbox. Missing Bridge identities fail closed. UID filters are bound
+to the source mailbox's UIDVALIDITY and checked under its lock, protecting
+against a mailbox rebuild between authorization and reading. Message bodies
+and membership never use an old authorization cache.
+
+FTS (cached snippets/index stats), server logs, drafts, local scheduled/reminder
+history, and mailbox administration still lack safe message scope. They remain
+unavailable in this first implementation, rather than expose unfiltered
+account data. The tools that are exposed keep their original schemas; no
+label-related parameters or instructions are added.
 
 ## Outgoing mail
 
@@ -52,8 +63,9 @@ called. After SMTP, the label worker finds the exact Message-ID in the
 server-reported Sent mailbox and applies the label via IMAP COPY, preserving
 Sent membership. It verifies label membership before removing the job.
 
-**SMTP and labeling are not atomic.** A successful send reports `labeling:
-"queued"`; the sent copy remains hidden from the agent until labeling finishes.
+**SMTP and labeling are not atomic.** The agent receives the usual successful
+send result. The Sent copy becomes visible after background labeling finishes;
+no labeling status or special follow-up action is exposed to the agent.
 The worker checks every 10 seconds and retries labeling across Bridge outages,
 delayed Sent synchronization, and process restarts. Label retries never resend
 email. MailPouch must remain running for queued labeling and scheduled delivery.
@@ -78,13 +90,13 @@ Scheduling retains upstream's local persistent queue and 30-day horizon.
 Scheduled delivery uses the label configured at delivery time. Agent-facing
 list/cancel history is currently blocked because upstream records have no
 label provenance; scheduling still returns the new schedule ID. This is a
-follow-up capability, as are secondary labels and scoped analytics.
+follow-up capability. Secondary-label reads and analytics are already filtered.
 
 ## Incoming replies and verification
 
 MailPouch does not grant access based on a matching subject or conversation ID.
 An incoming reply must itself have the access label before the agent can read
-it. Proton's sticky-label setting is intended to apply a conversation's labels
+it. The agent does not need to know or request this label. Proton's sticky-label setting is intended to apply a conversation's labels
 to later sent/received messages; see Proton's own [settings text](https://github.com/ProtonMail/proton-translations/blob/fe-mail-settings/id_ID.json)
 and [label documentation](https://proton.me/support/using-folders-labels).
 Check sticky labels and conversation grouping in the Proton account, then verify

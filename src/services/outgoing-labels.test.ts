@@ -73,7 +73,7 @@ describe("durable outgoing labels", () => {
   it("blocks delivery preparation if the label or durable queue is unavailable", async () => {
     const { queue, imap } = setup();
     imap.syncFolders.mockResolvedValueOnce([]);
-    await expect(queue.prepare(id)).rejects.toThrow("Create the configured");
+    await expect(queue.prepare(id)).rejects.toThrow("Mailbox unavailable");
     writeFileSync(path, "corrupt");
     await expect(queue.prepare(id)).rejects.toThrow();
   });
