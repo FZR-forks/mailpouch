@@ -123,6 +123,7 @@ export class SMTPService {
    */
   readonly backoff = new BackoffTracker();
 
+  /** Initialize this account's SMTP transport and optional outgoing-label lifecycle. */
   constructor(config: ProtonMailConfig, private readonly outgoingLabels?: OutgoingLabeler) {
     this.config = config;
     this.initializeTransporter();

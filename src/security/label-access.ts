@@ -125,6 +125,7 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
     return true;
   };
   return new Proxy(imap, {
+    /** Intercept mail operations before binding other methods to the original service instance. */
     get(target, property) {
       if (property === "getEmails") return (path = "INBOX", limit = 50, offset = 0) => mailboxOperation(async () => {
         const scope = await scopeFor(path);

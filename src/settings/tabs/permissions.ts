@@ -1,4 +1,5 @@
 // src/settings/tabs/permissions.ts
+/** Render owner-facing tool permissions and private mailbox-access policy controls. */
 export function buildPermissionsHtml(): string {
   return `
   <div class="section-heading">Permissions</div>

@@ -622,6 +622,7 @@ export class AccountManager extends EventEmitter {
     }
   }
 
+  /** Build isolated account services and a mailbox-bound outgoing labeling queue. */
   private createServices(spec: AccountSpec): AccountServices {
     const runtimeSpec = cloneAccountSpec(spec);
     const imap = new SimpleIMAPService();

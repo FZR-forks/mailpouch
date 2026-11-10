@@ -280,6 +280,7 @@ export function configExists(): boolean {
   return existsSync(getConfigPath());
 }
 
+/** Load normalized config, preserving invalid policy values for fail-closed authorization. */
 export function loadConfig(): ServerConfig | null {
   const path = getConfigPath();
 
@@ -803,6 +804,7 @@ export function loadConfigForWrite(): ServerConfig {
   return defaultConfig();
 }
 
+/** Atomically publish owner settings, persisting activation evidence before enabling mail filtering. */
 export function saveConfig(config: ServerConfig): void {
   tracer.spanSync('config.save', {}, () => {
   const dest    = getConfigPath();

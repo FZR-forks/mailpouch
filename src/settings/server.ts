@@ -941,6 +941,7 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/** Serve operator settings with session/CSRF protection and validated configuration writes. */
 export function createSettingsServer(secOpts: ServerSecurityOptions): http.Server {
   const { port, lan, accessToken, scheme } = secOpts;
   const configPath = getConfigPath();

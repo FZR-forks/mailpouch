@@ -20,6 +20,7 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private stopped = false;
+  /** Resume persisted account-owned labeling work without dispatching SMTP deliveries. */
   constructor(
     private readonly path: string,
     private readonly imap: SimpleIMAPService,

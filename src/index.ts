@@ -897,6 +897,7 @@ function notifyActionPerformed(
   }
 }
 
+/** Register each session's tools, resources, and prompts with shared routing and authorization. */
 function registerHandlers(server: Server): void {
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const tier = activeToolTier();
@@ -1502,6 +1503,7 @@ async function readFromActiveSurface<T>(
   return result;
 }
 
+/** Authorize resource/prompt reads against the active account, caller grant, and live mail policy. */
 function requireReadSurfaceAccess(
   tool: ToolName,
   args: Record<string, unknown> = {},

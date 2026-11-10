@@ -104,6 +104,7 @@ export function buildGrantApprovalBody(
   };
 }
 
+/** Render the operator settings shell with its session token, CSP nonce, and tab-loading UI. */
 export function buildShellHtml(csrfToken: string, runningPort = 8766, cspNonce = ""): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
