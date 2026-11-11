@@ -86,6 +86,8 @@ export interface ToolCallContext {
   /** Per-call resolved services (honor `account_id` routing). */
   imapService: SimpleIMAPService;
   smtpService: SMTPService;
+  /** Record SMTP-confirmed delivery before any follow-up IMAP work; never call for an ambiguous or failed send. */
+  recordMailDelivery?: (messageId?: string) => void;
 
   /** Process-wide or account-owned services selected by the dispatcher. */
   simpleloginService: SimpleLoginService;

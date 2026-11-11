@@ -226,6 +226,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!result.success) {
       return { content: [{ type: "text" as const, text: result.error ?? "Email delivery failed" }], isError: true };
     }
+    ctx.recordMailDelivery?.(result.messageId);
     invalidateAnalytics();
     return actionOk(result.messageId);
   },
@@ -294,6 +295,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!result.success) {
       return { content: [{ type: "text" as const, text: result.error ?? "Email delivery failed" }], isError: true };
     }
+    ctx.recordMailDelivery?.(result.messageId);
     if (result.success) {
       // Keep the flag operation in the exact mailbox read above. IMAP UIDs
       // are folder-scoped, so an unqualified setFlag can mark a colliding UID
@@ -367,6 +369,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!fwdResult.success) {
       return { content: [{ type: "text" as const, text: fwdResult.error ?? "Forward failed" }], isError: true };
     }
+    ctx.recordMailDelivery?.(fwdResult.messageId);
     if (fwdResult.success) {
       // Best-effort flag; log (don't fail the send) so a flag-set failure isn't invisible.
       await imapService.setFlag(fwdId, '$Forwarded', true, fwdOriginal.folder).catch((err) =>
@@ -391,6 +394,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!result.success) {
       return { content: [{ type: "text" as const, text: "Test email failed" }], isError: true };
     }
+    ctx.recordMailDelivery?.(result.messageId);
     invalidateAnalytics();
     return actionOk(result.messageId);
   },

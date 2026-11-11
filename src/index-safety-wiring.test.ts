@@ -101,7 +101,9 @@ describe("production safety wiring", () => {
   it("revalidates all mail used by tool and resource/prompt handlers after their combined result is built", () => {
     const tool = source.slice(source.indexOf("const scopedImap = labelScopedImap(routedImapService"));
     const toolCheck = tool.indexOf("await assertLabelAccessCurrent(scopedImap)");
-    expect(toolCheck).toBeGreaterThan(tool.indexOf("const result = ACCOUNT_MAIL_MUTATION_TOOLS.has(name)"));
+    expect(toolCheck).toBeGreaterThan(tool.indexOf("const result = await executeMailTool({"));
+    expect(tool).toMatch(/executeMailTool\(\{\s*invoke: invokeHandler,\s*validate: async \(\) =>/);
+    expect(tool).toMatch(/deadline: ACCOUNT_MAIL_MUTATION_TOOLS\.has\(name\) \? \{/);
     expect(toolCheck).toBeLessThan(tool.indexOf("if (currentAccessLabelFolder() !== aiLabelFolder"));
     const surfaceStart = source.indexOf("async function readFromActiveSurface<T>(");
     const surface = source.slice(surfaceStart, source.indexOf("function requireReadSurfaceAccess(", surfaceStart));

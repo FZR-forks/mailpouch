@@ -36,7 +36,7 @@ instructions, cursors, and successful send results. Messages keep their normal
 folder names and UIDs. Unlabeled messages resolve as absent. The account owner
 can add/remove messages from the visible set in Proton without restarting
 MailPouch; changes take effect after Bridge synchronizes. A policy change during
-a request discards its result. The backend rechecks access-label membership and
+a request discards any mail content in its result. The backend rechecks access-label membership and
 its mailbox generation after each scoped operation, before releasing results;
 if membership changed, retry the operation. Folder enumeration and the initial
 label snapshot are shared within an operation, with one final label scan rather
@@ -45,6 +45,14 @@ existing maximum of 20 folders. Combined tool, resource, and prompt responses
 also revalidate every read they used before release, including analytics that
 reads Inbox and Sent separately. Policy setup failures surface as an ordinary
 mailbox-unavailable error, with details retained in owner logs.
+
+Final validation for mail mutations stays within the same 50-second request
+deadline as the handler. Once SMTP confirms a send, if a later failure,
+cancellation, or deadline prevents normal completion, the response contains
+only the successful delivery receipt and Message-ID (when available), with an
+explicit instruction not to resend.
+It never returns discarded original-message content or raw validation errors.
+Unconfirmed or ambiguous sends retain their normal failure/outcome warnings.
 
 The cross-folder membership check uses Bridge's generated `X-Pm-Internal-Id`,
 not a sender-controlled RFC Message-ID. Distinct messages sharing a Message-ID

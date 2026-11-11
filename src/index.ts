@@ -2,6 +2,7 @@
 import { AnalyticsService } from "./services/analytics-service.js";
 import { currentAccessLabelFolder } from "./security/label-config.js";
 import { requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent } from "./security/label-access.js";
+import { executeMailTool } from "./services/mail-tool-execution.js";
 
 /**
  * Proton Mail MCP Server
@@ -48,7 +49,6 @@ import {
   MAILBOX_MUTATION_TOOLS,
   MailboxMutationDeadlineError,
   SMTP_MUTATION_TOOLS,
-  withMailboxMutationDeadline,
 } from "./services/mailbox-mutation-deadline.js";
 import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { SchedulerService } from "./services/scheduler.js";
@@ -1368,7 +1368,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       MAX_SUBJECT_LENGTH,
       state: sharedState,
     };
-    const invokeHandler = async () => {
+    const invokeHandler = async (recordMailDelivery: (messageId?: string) => void) => {
+      ctx.recordMailDelivery = recordMailDelivery;
       if (MAILBOX_MUTATION_TOOLS.has(name)) {
         await routedImapService.ensureMutationConnection();
       }
@@ -1377,8 +1378,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         () => handler(ctx),
       );
     };
-    const result = ACCOUNT_MAIL_MUTATION_TOOLS.has(name)
-      ? await withMailboxMutationDeadline({
+    const result = await executeMailTool({
+      invoke: invokeHandler,
+      validate: async () => {
+        await assertLabelAccessCurrent(scopedImap);
+        if (currentAccessLabelFolder() !== aiLabelFolder
+            || !isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
+          logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
+            tool: name,
+            accountId: requestedAccountId,
+          });
+          throw new McpError(ErrorCode.InvalidRequest,
+            "The account or AI access policy changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.");
+        }
+      },
+      deadline: ACCOUNT_MAIL_MUTATION_TOOLS.has(name) ? {
         tool: name,
         signal: extra.signal,
         deadlineAt: mailboxMutationDeadlineAt,
@@ -1396,24 +1410,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             ),
           }] : []),
         ],
-      }, invokeHandler)
-      : await invokeHandler();
-    await assertLabelAccessCurrent(scopedImap);
-    if (currentAccessLabelFolder() !== aiLabelFolder
-        || !isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
-      resultIsError = true;
-      logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
-        tool: name,
-        accountId: requestedAccountId,
-      });
-      return {
-        content: [{
-          type: "text" as const,
-          text: "The account or AI access policy changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.",
-        }],
-        isError: true,
-      };
-    }
+      } : undefined,
+    });
     resultIsError = result.isError === true;
     // Per-action security notification (debug aid) — debug-logs a successful
     // non-read-only action; also toasts it when "Surface security messages" is

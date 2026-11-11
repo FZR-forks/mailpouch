@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { accessLabelFolder, scopeLabelTool, requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent } from "./label-access.js";
 import { SimpleIMAPService } from "../services/simple-imap-service.js";
 import { handlers as reading } from "../tools/reading.js";
+import { handlers as sending } from "../tools/sending.js";
+import { executeMailTool } from "../services/mail-tool-execution.js";
 import type { ToolCallContext } from "../tools/types.js";
 import type { EmailMessage } from "../types/index.js";
 
@@ -299,6 +301,37 @@ describe("transparent backend mail filter", () => {
     mailboxes.set(folder, mailboxes.get(folder)!.filter(message => message.internalId === "proton-sent"));
     expect(await view.getEmails("Sent")).toHaveLength(1);
     await expect(assertLabelAccessCurrent(view)).rejects.toThrow("Mailbox temporarily unavailable");
+  });
+  it.each([
+    ["reply_to_email", "addition"], ["reply_to_email", "revocation"],
+    ["forward_email", "addition"], ["forward_email", "revocation"],
+  ])("preserves only the %s delivery receipt after a label %s during SMTP", async (tool, change) => {
+    const { view, mailboxes, hidden } = fixture();
+    const sendEmail = vi.fn(async () => {
+      if (change === "addition") mailboxes.get(folder)!.push({ ...hidden, uid: "902" });
+      else mailboxes.set(folder, mailboxes.get(folder)!.filter(message => message.internalId !== "proton-a"));
+      return { success: true, messageId: "<sent-receipt@example.com>" };
+    });
+    const ctx = {
+      args: { emailId: "42", folder: "INBOX", to: "recipient@example.com", body: "Thanks" },
+      imapService: view, smtpService: { sendEmail }, config: { smtp: { username: "owner@example.com" } },
+      getCallerAllowedFolders: () => undefined, invalidateAnalytics: vi.fn(),
+      actionOk: (messageId?: string) => ({ content: [], structuredContent: { success: true, messageId } }),
+      MAX_SUBJECT_LENGTH: 998, MAX_BODY_LENGTH: 10_000,
+    } as unknown as ToolCallContext;
+    const result = await executeMailTool({
+      invoke: record => { ctx.recordMailDelivery = record; return sending[tool](ctx); },
+      validate: () => assertLabelAccessCurrent(view),
+    });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      success: true, messageId: "<sent-receipt@example.com>", reason: expect.stringContaining("Do not resend"),
+    });
+    for (const secret of ["Approved body", "Same subject", "sender@example.com", folder]) {
+      expect(JSON.stringify(result)).not.toContain(secret);
+    }
+    if (change === "revocation") expect(await view.getEmailById("42", "INBOX")).toBeNull();
   });
   it("allows attachments and flag changes only for approved physical-folder UIDs", async () => {
     const { view, hidden, approved, client } = fixture();
