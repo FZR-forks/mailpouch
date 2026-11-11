@@ -19,11 +19,6 @@ export function withMailboxScopes<T>(authorized: Iterable<AuthorizedMailboxScope
   return scopes.run(new Map([...authorized].map(scope => [scope.folder, scope])), operation);
 }
 
-/** Run backend-owned follow-up work (not agent-selected UIDs) outside any scoped-mutation context. */
-export function withoutMailboxScopes<T>(operation: () => Promise<T>): Promise<T> {
-  return scopes.exit(operation);
-}
-
 /** Fail closed when a scoped mutation touches another mailbox, generation, or UID. */
 export function assertScopedMailbox(
   folder: string,

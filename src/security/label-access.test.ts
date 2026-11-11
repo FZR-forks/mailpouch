@@ -233,6 +233,20 @@ describe("transparent backend mail filter", () => {
     expect((await view.getEmailById("42"))?.folder).toBe("INBOX");
     expect(client.getMailboxLock.mock.calls.map(([path]) => path)).toEqual([folder, "INBOX", "INBOX", folder]);
   });
+  it("checks the All Mail union last in folderless lookups, even when it is listed first", async () => {
+    const f = fixture();
+    const existing = [...f.mailboxes];
+    f.mailboxes.clear();
+    f.mailboxes.set("All Mail", [{ ...f.approved }]);
+    existing.forEach(([path, messages]) => f.mailboxes.set(path, messages));
+    f.generations.set("All Mail", 1n);
+    expect((await f.view.getEmailById("42"))?.folder).toBe("INBOX");
+  });
+  it("incremental identity reads never skip UIDs below one cached by a targeted read", async () => {
+    const { imap } = fixture();
+    await imap.readMailboxEntries("INBOX", ["43"]);
+    expect((await imap.readNewMailboxEntries("INBOX")).map(entry => entry.uid).sort()).toEqual(["42", "43"]);
+  });
   it("refreshes label membership between multi-folder operations", async () => {
     const { view, client, mailboxes } = fixture();
     expect((await view.getFolders()).map(entry => entry.totalMessages)).toEqual([1, 1, 1]);
@@ -436,20 +450,6 @@ describe("label-scoped organizing, drafts, and tool visibility", () => {
     withMailbox(f, "Trash");
     expect(await f.view.moveEmail("8", "Trash")).toBe(true);
     expect(f.mailboxes.get("Trash")!.map(m => m.internalId)).toEqual(["proton-sent"]);
-  });
-
-  it("re-applies the access label when the server drops it during a move", async () => {
-    const f = fixture();
-    withMailbox(f, "Archive");
-    const move = f.client.messageMove.getMockImplementation()!;
-    f.client.messageMove.mockImplementation(async (range: string, target: string) => {
-      const result = await move(range, target);
-      f.mailboxes.set(folder, f.mailboxes.get(folder)!.filter(m => m.internalId !== "proton-a"));
-      return result;
-    });
-    await f.view.moveEmail("42", "Archive", "INBOX");
-    expect(f.mailboxes.get(folder)!.map(m => m.internalId)).toContain("proton-a");
-    expect((await f.view.getEmails("Archive")).map(m => m.id)).toHaveLength(1);
   });
 
   it("bulk-moves only approved UIDs and reports the rest as not found", async () => {

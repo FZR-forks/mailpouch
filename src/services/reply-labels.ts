@@ -70,13 +70,13 @@ export class ReplyLabeler {
     return new Set(this.readState().labels[label] ?? []);
   }
 
-  /** Durably record approved identities, merging with concurrent writers. */
-  private remember(label: string, identities: Iterable<string>): void {
+  /** Durably add (or, with `forget`, remove) approved identities, merging with concurrent writers. */
+  private remember(label: string, identities: Iterable<string>, forget = false): void {
     withFileLock(this.path, () => {
       const state = this.readState();
       const current = new Set(state.labels[label] ?? []);
       const before = current.size;
-      for (const id of identities) current.add(id);
+      for (const id of identities) if (forget) current.delete(id); else current.add(id);
       if (current.size === before) return;
       state.labels[label] = [...current];
       writeOwnerOnlyJsonAtomically(this.path, state);
@@ -115,8 +115,9 @@ export class ReplyLabeler {
     // carrier of an anchor's Message-ID, so any read failure aborts the scan.
     const candidates: Array<{ folder: string; entries: MailboxMessageIdentity[] }> = [];
     for (const path of sources) candidates.push({ folder: path, entries: await this.imap.readNewMailboxEntries(path) });
+    // Live membership: a reply restored from Spam/Trash must stop being excluded.
     const excludedEntries: MailboxMessageIdentity[] = [];
-    for (const f of mailboxes.filter(isExcluded)) excludedEntries.push(...await this.imap.readNewMailboxEntries(f.path));
+    for (const f of mailboxes.filter(isExcluded)) excludedEntries.push(...(await this.imap.readMailboxEntries(f.path)).entries);
     const excluded = new Set(excludedEntries.flatMap(entry => entry.internalId ? [entry.internalId] : []));
 
     // Every carrier of each Message-ID, including Spam/Trash. A carrier without
@@ -158,14 +159,17 @@ export class ReplyLabeler {
       let policy: string | undefined;
       try { policy = this.getLabelFolder(); } catch { break; }
       if (policy !== label) break;
+      // Record the approval before exposing the reply, so a later removal
+      // always sticks; forget it only if the COPY definitely did not happen.
+      this.remember(label, [identity]);
       try {
         await withBackgroundAccountMailMutation({
           tool: "reply_label",
           transports: [{ scope: this.imap, abort: () => this.imap.abortPrimaryMutationTransport("Reply labeling cancelled") }],
         }, () => this.imap.copyVerifiedToFolder(entry.uid, label, folder, headers => headers.internalId === identity));
-        this.remember(label, [identity]);
         labeled++;
       } catch (error) {
+        if (!(await approvedNow()).has(identity)) this.remember(label, [identity], true);
         logger.warn("Could not label a reply to approved mail; will retry", "ReplyLabels", error);
       }
     }

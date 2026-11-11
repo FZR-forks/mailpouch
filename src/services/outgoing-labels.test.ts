@@ -53,14 +53,25 @@ describe("durable outgoing labels", () => {
     await queue.processNow();
     expect(imap.copyEmailToFolder).toHaveBeenLastCalledWith("9", folder, "Envoyés");
   });
-  it("drops a missing draft's job after a day without flagging operator attention", async () => {
-    const { queue } = setup();
+  it("drops a draft's job after a day only once searches confirm the draft is gone", async () => {
+    const { queue, imap, mailboxes } = setup();
     await queue.prepare(id, folder, "drafts");
     const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + 25 * 60 * 60 * 1000);
+    // Bridge unavailable: age alone never drops the job.
+    const search = imap.searchEmails.getMockImplementation()!;
+    imap.searchEmails.mockRejectedValueOnce(new Error("Bridge offline"));
+    await expect(queue.processPending()).rejects.toThrow("Bridge offline");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveLength(1);
+    imap.searchEmails.mockImplementation(search);
     await queue.processPending();
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([]);
     expect(warn).toHaveBeenCalled();
+    // A day-old draft that still exists is labeled, not dropped.
+    await queue.prepare(id, folder, "drafts");
+    mailboxes.set("Brouillons", [{ id: "3", messageId: id }]);
+    await queue.processPending();
+    expect(imap.copyEmailToFolder).toHaveBeenCalledWith("3", folder, "Brouillons");
   });
 
   it("persists before delivery, tolerates delayed Sent, and resumes after restart", async () => {

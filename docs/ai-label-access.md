@@ -29,9 +29,11 @@ results. Requests naming it behave as if it does not exist ("Folder not found").
 
 Everything with the label is fully usable: reading, search, threads, attachments,
 flags, moving (including archive, spam, and trash), adding/removing other labels,
-creating/renaming folders, drafts, replies, forwards, and scheduled sends. Moves keep the access label; if the server drops it during a move,
-MailPouch re-applies it. The agent can never add, remove, rename, or recreate the
-access label itself.
+creating/renaming folders, drafts, replies, forwards, and scheduled sends. Proton
+labels belong to the message, so moves keep the access label. MailPouch never
+re-applies a label that disappears, because it cannot tell a server-side loss
+from the owner removing it. The agent can never add, remove, rename, or recreate
+the access label itself.
 
 These tools are not listed while the policy is on, and calling them answers
 exactly like an unknown tool: `delete_email`, `bulk_delete_emails`, `empty_trash`,
@@ -87,7 +89,8 @@ discarded original-message content or raw validation errors.
 Mail an agent sends under the policy (direct sends, replies, forwards, test
 sends, and its scheduled sends) and drafts it saves are labeled automatically.
 Mail the owner sends, including schedules the owner created and sends from the
-settings UI, is never labeled, even if it is delivered while the policy is on.
+settings UI, is not labeled at send time, even if it is delivered while the policy
+is on. The owner's replies to approved mail are replies like any other (see below).
 If the policy changes between a request and delivery, the copy is not labeled. `send_email`, `reply_to_email`,
 `forward_email`, and `schedule_email` accept an optional `from` address so an
 agent can pick among the account's addresses; Proton SMTP validates it.
@@ -97,7 +100,7 @@ Before delivery, MailPouch checks that the label exists and durably queues a
 server-generated Message-ID using the sender's domain. If either step fails, SMTP
 is not called. After SMTP, the label worker finds that exact Message-ID in Sent
 and applies the label via IMAP COPY, then verifies it. Every background COPY
-(sent mail, drafts, replies, moved mail) first proves the message's identity
+(sent mail, drafts, replies) first proves the message's identity
 under the source mailbox lock and is refused if the mailbox was rebuilt since. It retries a few seconds
 after the send, then every 10 seconds, across Bridge outages, delayed Sent
 synchronization, and restarts; retries never resend mail. Drafts are labeled the
@@ -125,14 +128,17 @@ Replies to approved mail are approved automatically, so the agent sees answers
 to what it sent and to what the owner labeled, regardless of Proton's sticky
 labels setting (which also works if enabled). About every 30 seconds, while IMAP
 is connected, MailPouch labels a message whose `In-Reply-To`/`References` names
-the Message-ID of an approved message, including replies to replies. Rules:
+the Message-ID of an approved message, including replies to replies and the
+owner's own replies in that thread (as Proton's sticky labels would). Rules:
 
 - A Message-ID only counts when *every* message carrying it is approved. A sender
   reusing another thread's Message-ID, or a copy in Spam/Trash, blocks it.
-- Spam and Trash are never labeled.
+- Spam and Trash are never labeled; a reply restored from them is labeled on the
+  next scan.
 - If any mailbox cannot be read, the scan labels nothing. Right before each COPY
   the worker re-reads the label and the policy, so an anchor whose label was
-  removed mid-scan approves nothing further.
+  removed mid-scan approves nothing further. Each approval is saved before its
+  COPY, so a later removal always sticks.
 - A message once seen with the label is never labeled again. If the owner removes
   the label from a reply, it stays hidden (state: `.reply-labels-<fingerprint>.json`).
   Removing the label from one message does not stop later replies that reference

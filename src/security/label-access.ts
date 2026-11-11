@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { MailboxMutationDeadlineError } from "../services/mailbox-mutation-deadline.js";
-import { withMailboxScopes, withoutMailboxScopes } from "../services/mailbox-scope-guard.js";
+import { withMailboxScopes } from "../services/mailbox-scope-guard.js";
 import { logger } from "../utils/logger.js";
 import type { EmailFolder, EmailMessage, SaveDraftOptions, SearchEmailOptions } from "../types/index.js";
 import { SEARCH_FOLDER_CAP, type MailboxUidScope, type SimpleIMAPService } from "../services/simple-imap-service.js";
@@ -232,7 +232,10 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
     const scopesFor = async function* (paths?: string[], entries?: EmailFolder[], limit?: number, uids?: string[]): AsyncGenerator<MailboxUidScope> {
       const available = entries ?? await rawFolders();
       const availablePaths = new Set(available.map(entry => entry.path));
-      const requested = paths ? [...new Set(paths.map(normalize))] : [...availablePaths];
+      // Like getEmailById, a folderless lookup checks the All Mail union last so a real folder wins.
+      const isAllMail = (entry: EmailFolder) => entry.specialUse === "\\All" || entry.path === "All Mail";
+      const requested = paths ? [...new Set(paths.map(normalize))]
+        : [...available.filter(entry => !isAllMail(entry)), ...available.filter(isAllMail)].map(entry => entry.path);
       if (requested.some(path => !availablePaths.has(path))) {
         throw new McpError(ErrorCode.InvalidParams, "Folder not found");
       }
@@ -289,26 +292,6 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
   /** Mutations authorize against fresh membership and re-prove it under each mailbox lock; their results carry no mail content. */
   const scopedMutation = <T>(operation: (scope: ReturnType<typeof createOperation>) => Promise<T>) =>
     mailboxOperation(() => operation(createOperation()));
-
-  /** Keep moved messages approved if the server dropped the label during the move. Best-effort; logged on failure. */
-  const keepApproved = (scope: MailboxUidScope, ids: string[], target: string) => withoutMailboxScopes(async () => {
-    try {
-      const identities = imap.scopeIdentities(scope);
-      const moved = new Set(ids.flatMap(id => identities.get(id) ?? []));
-      if (!moved.size) return;
-      const labeled = await imap.readLabelIdentities(folder);
-      const lost = new Set([...moved].filter(identity => !labeled.has(identity)));
-      if (!lost.size) return;
-      const destination = await imap.readMailboxEntries(target);
-      for (const entry of destination.entries) {
-        if (!entry.internalId || !lost.has(entry.internalId)) continue;
-        const identity = entry.internalId;
-        await imap.copyVerifiedToFolder(entry.uid, folder, target, headers => headers.internalId === identity);
-      }
-    } catch (error) {
-      logger.warn("Could not confirm that moved mail kept its access label", "MailboxAccess", error);
-    }
-  });
 
   /** Re-prove, immediately before mutating, that every targeted message is still approved. */
   const assertTargetsApproved = async (groups: Map<MailboxUidScope, string[]>) => {
@@ -396,19 +379,11 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
     bulkStar: (ids: string[], value = true, path?: string) => flagMany(ids, "\\Flagged", value, path),
     moveEmail: async (id: string, target: string, path?: string) => {
       denyAccessPath(target);
-      return single(id, path, async scope => {
-        const moved = await passThrough(() => imap.moveEmail(id, target, scope.folder));
-        await keepApproved(scope, [id], target);
-        return moved;
-      });
+      return single(id, path, scope => passThrough(() => imap.moveEmail(id, target, scope.folder)));
     },
     bulkMoveEmails: async (ids: string[], target: string, path?: string) => {
       denyAccessPath(target);
-      return bulk(ids, path, async (scope, approved) => {
-        const result = await passThrough(() => imap.bulkMoveEmails(approved, target, scope.folder));
-        await keepApproved(scope, approved, target);
-        return result;
-      });
+      return bulk(ids, path, (scope, approved) => passThrough(() => imap.bulkMoveEmails(approved, target, scope.folder)));
     },
     copyEmailToFolder: async (id: string, target: string, path?: string) => {
       denyAccessPath(target);

@@ -109,13 +109,6 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
       let jobs = this.read();
       // Retain old attempts for operator recovery instead of silently dropping
       // labeling work. Retired records no longer retry or consume active capacity.
-      const draftExpired = (job: LabelJob) => job.mailbox === "drafts" && job.createdAt !== undefined
-        && now - job.createdAt >= MAX_DRAFT_JOB_AGE_MS;
-      if (jobs.some(draftExpired)) {
-        logger.warn("Dropped labeling for agent drafts that no longer exist", "OutgoingLabels");
-        this.update(current => current.filter(job => !draftExpired(job)));
-        jobs = this.read();
-      }
       if (jobs.some(job => job.needsAttentionAt === undefined
           && (job.createdAt === undefined || now - job.createdAt >= MAX_JOB_AGE_MS))) {
         const retired: string[] = [];
@@ -149,7 +142,7 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
         try {
           // A draft may already have been sent from Proton; then its copy is in Sent.
           const sources = job.mailbox === "drafts" ? [...(drafts ? [drafts] : []), sent] : [sent];
-          await this.processJob(job, sources);
+          await this.processJob(job, sources, job.mailbox === "drafts" && drafts !== undefined);
         } catch (error) {
           firstFailure ??= { error };
         }
@@ -158,8 +151,12 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
     } finally { this.running = false; }
   }
 
-  /** Resolve one exact queued message; missing or unconfirmed copies remain queued. */
-  private async processJob(job: LabelJob, sources: string[]): Promise<void> {
+  /**
+   * Resolve one exact queued message; missing or unconfirmed copies remain
+   * queued. With `mayExpire`, a draft that searches found in none of its
+   * sources for a day was deleted, and its job is dropped.
+   */
+  private async processJob(job: LabelJob, sources: string[], mayExpire: boolean): Promise<void> {
     // Header SEARCH is a substring match; require exact Message-ID too.
     const find = async (folder: string) => (await this.imap.searchEmails({
       folder, header: { field: "Message-ID", value: job.messageId }, limit: 200,
@@ -171,7 +168,13 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
         messages = await find(candidate);
         if (messages.length) { source = candidate; break; }
       }
-      if (!source) return; // Sent can lag SMTP acceptance.
+      if (!source) { // Sent can lag SMTP acceptance.
+        if (mayExpire && job.createdAt !== undefined && Date.now() - job.createdAt >= MAX_DRAFT_JOB_AGE_MS) {
+          logger.warn("Dropped labeling for an agent draft that no longer exists", "OutgoingLabels");
+          this.update(current => current.filter(j => j.messageId !== job.messageId));
+        }
+        return;
+      }
       for (const message of messages) {
         if (this.stopped) return;
         await withBackgroundAccountMailMutation({

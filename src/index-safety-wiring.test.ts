@@ -31,6 +31,16 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("re-reads the access policy after the destructive-confirm await, before dispatch", () => {
+    const elicit = source.indexOf("await server.elicitInput(");
+    const recheck = source.indexOf("const finalLabelFolder = requireLabelToolScope(");
+    const dispatch = source.indexOf("const scopedImap = labelScopedImap(");
+    expect(elicit).toBeGreaterThan(-1);
+    expect(recheck).toBeGreaterThan(elicit);
+    expect(recheck).toBeLessThan(dispatch);
+    expect(source).toMatch(/if \(finalLabelFolder !== aiLabelFolder\) \{\n\s*throw /);
+  });
+
   it("rejects unregistered tool names before the escalation pre-gate", () => {
     const reject = source.indexOf("if (!Object.hasOwn(_escalationHandlers, name) && !Object.hasOwn(_toolHandlers, name))");
     const escalation = source.indexOf("if (_escalationHandlers[name])");

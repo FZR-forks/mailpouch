@@ -1202,6 +1202,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     } else {
       logger.info(`Destructive tool '${name}' executing with { confirmed: true }`, "MCPServer");
     }
+    // The dialog can stay open while the owner changes the access policy;
+    // never dispatch under the scope captured before it.
+    const finalLabelFolder = requireLabelToolScope({
+      tool: name, args: args as Record<string, unknown>, caller,
+      readFolder: currentAccessLabelFolder, audit: agentAudit, errorMessage: safeErrorMessage,
+    });
+    if (finalLabelFolder !== aiLabelFolder) {
+      throw new McpError(ErrorCode.InvalidRequest, "The account changed while this request was waiting for confirmation; retry the request.");
+    }
   }
 
   // Reserve a grant-scoped hourly slot only once every other pre-execution

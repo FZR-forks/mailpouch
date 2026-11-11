@@ -107,6 +107,8 @@ describe("durable fail-closed label policy", () => {
     const read = createLabelPolicyReader(() => config, () => false, {
       enabled: () => false, record: () => { throw new Error("disk full"); },
     });
+    // The constructor's startup read already failed to persist; every later read retries and stays blocked.
+    expect(read).toThrow("blocked");
     expect(read).toThrow("blocked");
     config = null;
     expect(read).toThrow("blocked");

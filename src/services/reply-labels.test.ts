@@ -95,13 +95,30 @@ describe("background reply labeling", () => {
     expect(JSON.parse(readFileSync(path, "utf8")).labels[label].sort()).toEqual(["original", "reply"]);
   });
 
-  it("never labels Spam or Trash", async () => {
+  it("never labels Spam or Trash, but labels a reply once it is restored", async () => {
     const f = setup();
     approve(f, { uid: "1", internalId: "original", messageId: "<a@x>" });
     // All Mail may include messages that are also in Spam.
     f.source.push({ uid: "2", internalId: "spammy", messageId: "<b@y>", parents: ["<a@x>"] });
     f.mailboxes.get("Spam")!.push({ uid: "7", internalId: "spammy", messageId: "<b@y>", parents: ["<a@x>"] });
     expect(await f.labeler.scan()).toBe(0);
+    f.mailboxes.set("Spam", []);
+    expect(await f.labeler.scan()).toBe(1);
+  });
+
+  it("records an approval before the COPY, and forgets it only when the COPY did not land", async () => {
+    const f = setup();
+    approve(f, { uid: "1", internalId: "original", messageId: "<a@x>" });
+    f.source.push({ uid: "2", internalId: "reply", messageId: "<b@y>", parents: ["<a@x>"] });
+    let recordedBeforeCopy = false;
+    f.imap.copyVerifiedToFolder.mockImplementationOnce(async () => {
+      recordedBeforeCopy = JSON.parse(readFileSync(path, "utf8")).labels[label].includes("reply");
+      throw new Error("Bridge offline");
+    });
+    expect(await f.labeler.scan()).toBe(0);
+    expect(recordedBeforeCopy).toBe(true);
+    expect(JSON.parse(readFileSync(path, "utf8")).labels[label]).toEqual(["original"]);
+    expect(await f.labeler.scan()).toBe(1);
   });
 
   it("scans ordinary folders when All Mail is hidden", async () => {
@@ -128,11 +145,13 @@ describe("background reply labeling", () => {
       const f = setup();
       approve(f, { uid: "1", internalId: "approved", messageId: "<a@x>" });
       f.source.push({ uid: "2", internalId: "reply", messageId: "<b@y>", parents: ["<a@x>"] });
-      const read = f.imap.readNewMailboxEntries.getMockImplementation()!;
-      f.imap.readNewMailboxEntries.mockImplementation(async (p: string) => {
-        if (p === failing) throw new Error("Bridge offline");
-        return read(p);
-      });
+      for (const reader of [f.imap.readNewMailboxEntries, f.imap.readMailboxEntries] as const) {
+        const read = reader.getMockImplementation()! as (p: string) => Promise<never>;
+        reader.mockImplementation(async (p: string) => {
+          if (p === failing) throw new Error("Bridge offline");
+          return read(p);
+        });
+      }
       await expect(f.labeler.scan()).rejects.toThrow("Bridge offline");
       expect(f.imap.copyVerifiedToFolder).not.toHaveBeenCalled();
     }
@@ -146,9 +165,9 @@ describe("background reply labeling", () => {
       f.source.push({ uid: "2", internalId: "reply", messageId: "<b@y>", parents: ["<a@x>"] });
       // The change lands after planning, while the worker re-reads the label before copying.
       const reads = f.imap.readMailboxEntries.getMockImplementation()!;
-      let calls = 0;
+      let labelReads = 0;
       f.imap.readMailboxEntries.mockImplementation(async (p: string) => {
-        if (++calls === 2) {
+        if (p === label && ++labelReads === 2) {
           if (change === "revoke anchor") f.mailboxes.set(label, []);
           else policy = "Labels/Other";
         }
