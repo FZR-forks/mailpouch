@@ -155,8 +155,16 @@ label to incoming mail that matches rules, if the owner wants that.
 Automated tests cover scope bypasses, UID reuse, revocation during reads and
 between calls, scoped moves and label changes, filtered metadata, durable
 labeling retries, drafts, reply labeling, missing labels, alternate senders, tool
-visibility, and settings validation. Real Proton Bridge testing is still required
-before relying on this feature. Use an isolated test account to verify:
+visibility, and settings validation.
+
+Verified against Proton Bridge 3.27.1 (2026-11-11, isolated test account): every
+message carries `X-Pm-Internal-Id`, identical across Inbox, All Mail, and the
+label; COPY into `Labels/<name>` applies the label without duplicating the
+message; archive, trash, and restore keep the label; and, through the MCP server,
+items 1–3, 5 (with owner replies), and 6 below. Bridge lists All Mail without the
+`\All` flag. Item 4 (restart during labeling) is not yet verified live.
+
+To re-verify, for example after a Bridge upgrade, use an isolated test account:
 
 1. An unlabeled message and attachment cannot be read by tool, resource,
    prompt, thread, search, or cache path, even with a colliding Inbox UID.

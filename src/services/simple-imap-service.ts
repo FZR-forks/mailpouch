@@ -1583,11 +1583,13 @@ export class SimpleIMAPService {
     // reached by a future caller — a bad name must fail clearly, not via a cryptic
     // getMailboxLock error (or a path-traversal/CRLF reaching the IMAP wire).
     this.validateFolderName(folder);
+    // A scope with no approved mail matches nothing; skip the round-trip (and
+    // non-selectable hierarchy entries, which have no mailbox to open).
+    if (scope && !scope.uids.length) return [];
     const lock = await this.client.getMailboxLock(folder);
 
     try {
       this.assertUidScope(scope, folder);
-      if (scope && !scope.uids.length) return [];
       const searchCriteria = buildSearchCriteria(options);
       const chunks = scope ? chunkUidsForWire(scope.uids) : [undefined];
       const matched: number[] = [];

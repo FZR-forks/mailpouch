@@ -13,7 +13,7 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "mailpouch-replies-")); path
 afterEach(() => { vi.restoreAllMocks(); rmSync(dir, { recursive: true, force: true }); });
 
 type Message = { uid: string; internalId?: string; messageId?: string; parents?: string[] };
-function setup(options: { allMail?: boolean; policy?: () => string | undefined; active?: boolean } = {}) {
+function setup(options: { allMail?: boolean; allMailFlag?: boolean; policy?: () => string | undefined; active?: boolean } = {}) {
   const sourceName = options.allMail === false ? "INBOX" : "All Mail";
   const mailboxes = new Map<string, Message[]>([[sourceName, []], [label, []], ["Spam", []], ["Trash", []]]);
   if (options.allMail === false) mailboxes.set("Sent", []);
@@ -24,7 +24,7 @@ function setup(options: { allMail?: boolean; policy?: () => string | undefined; 
     selectableMailboxes: vi.fn(async () => [
       ...(options.allMail === false
         ? [{ path: "INBOX" }, { path: "Sent", specialUse: "\\Sent" }]
-        : [{ path: "All Mail", specialUse: "\\All" }]),
+        : [{ path: "All Mail", ...(options.allMailFlag === false ? {} : { specialUse: "\\All" }) }]),
       { path: label }, { path: "Spam", specialUse: "\\Junk" }, { path: "Trash", specialUse: "\\Trash" },
     ]),
     readMailboxEntries: vi.fn(async (p: string) => ({ uidValidity: 1n, entries: entries(p) })),
@@ -119,6 +119,14 @@ describe("background reply labeling", () => {
     expect(recordedBeforeCopy).toBe(true);
     expect(JSON.parse(readFileSync(path, "utf8")).labels[label]).toEqual(["original"]);
     expect(await f.labeler.scan()).toBe(1);
+  });
+
+  it("recognizes Bridge's All Mail by name when it lacks the \\All flag", async () => {
+    const f = setup({ allMailFlag: false });
+    approve(f, { uid: "1", internalId: "original", messageId: "<a@x>" });
+    f.source.push({ uid: "2", internalId: "reply", messageId: "<b@y>", parents: ["<a@x>"] });
+    expect(await f.labeler.scan()).toBe(1);
+    expect(f.imap.readNewMailboxEntries.mock.calls.map(([p]) => p)).toEqual(["All Mail"]);
   });
 
   it("scans ordinary folders when All Mail is hidden", async () => {

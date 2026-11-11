@@ -99,7 +99,8 @@ export class ReplyLabeler {
     const mailboxes = await this.imap.selectableMailboxes();
     const isExcluded = (f: { path: string; specialUse?: string }) =>
       f.specialUse === "\\Junk" || f.specialUse === "\\Trash" || f.path === "Spam" || f.path === "Trash";
-    const allMail = mailboxes.find(f => f.specialUse === "\\All");
+    // Bridge lists All Mail without the \All flag, so match its name too.
+    const allMail = mailboxes.find(f => f.specialUse === "\\All" || f.path === "All Mail");
     const sources = allMail ? [allMail.path] : mailboxes
       .filter(f => !f.path.startsWith("Labels/") && !isExcluded(f) && f.specialUse !== "\\Drafts")
       .map(f => f.path);

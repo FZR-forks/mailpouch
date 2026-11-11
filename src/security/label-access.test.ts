@@ -6,6 +6,7 @@ import { handlers as reading } from "../tools/reading.js";
 import { handlers as sending } from "../tools/sending.js";
 import { executeMailTool } from "../services/mail-tool-execution.js";
 import type { ToolCallContext } from "../tools/types.js";
+import { logger } from "../utils/logger.js";
 import type { EmailMessage } from "../types/index.js";
 
 const folder = "Labels/AI-Accessible";
@@ -241,6 +242,19 @@ describe("transparent backend mail filter", () => {
     existing.forEach(([path, messages]) => f.mailboxes.set(path, messages));
     f.generations.set("All Mail", 1n);
     expect((await f.view.getEmailById("42"))?.folder).toBe("INBOX");
+  });
+  it("searches skip folders without approved mail, including non-selectable parents", async () => {
+    const f = fixture();
+    f.mailboxes.set("Archive", []);
+    f.generations.set("Archive", 1n);
+    f.client.list.mockResolvedValue([...f.mailboxes.keys(), "Labels"].map(path => ({ path, flags: new Set(path === "Labels" ? ["\\Noselect"] : []) })));
+    vi.mocked(f.imap.syncFolders).mockResolvedValue([...f.mailboxes.keys(), "Labels"].map(path => ({ path, name: path, totalMessages: 0, unreadMessages: 0, folderType: "system" })));
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    await f.view.searchEmails({ folders: ["*"] });
+    const locks = f.client.getMailboxLock.mock.calls.map(([path]) => path);
+    expect(locks.filter(path => path === "Archive")).toHaveLength(1); // scope read only, no search
+    expect(locks).not.toContain("Labels");
+    expect(warn.mock.calls.filter(([message]) => /Search failed/.test(String(message)))).toEqual([]);
   });
   it("incremental identity reads never skip UIDs below one cached by a targeted read", async () => {
     const { imap } = fixture();
