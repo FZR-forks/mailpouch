@@ -134,6 +134,7 @@ export async function resetConfiguration(): Promise<ConfigurationResetResult> {
     // would disappear on restart and let an undeleted keychain entry revive
     // the old mailbox.
     const resetConfig = defaultConfig();
+    resetConfig.aiAccessLabel = ""; // Explicit full reset also disables the durable mailbox filter.
     resetConfig.configResetGeneration = currentResetGeneration + 1;
     if (keychainMailboxCredentialsQuarantined) {
       resetConfig.keychainMailboxCredentialsQuarantined = true;

@@ -1,4 +1,5 @@
 // src/settings/tabs/permissions.ts
+/** Render owner-facing tool permissions and private mailbox-access policy controls. */
 export function buildPermissionsHtml(): string {
   return `
   <div class="section-heading">Permissions</div>
@@ -20,6 +21,14 @@ export function buildPermissionsHtml(): string {
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Send-Only</td><td>Reading unlimited. Send ops rate-limited. Actions, deletion, folder writes, and bulk ops disabled.</td></tr>
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Full Access</td><td>All tools, no rate limits.</td></tr>
     </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title">AI email access label</div>
+    <div class="card-desc">Create this label in Proton and use it to approve messages for agents. MailPouch filters the existing folders and tools in the backend; agents do not select or see this access label. Sent messages and drafts are labeled automatically; turn on Proton's sticky labels so replies are too. Blank disables the filter. Applies to all accounts.</div>
+    <label for="ai-access-label">Label name</label>
+    <input id="ai-access-label" type="text" maxlength="255" placeholder="AI-Accessible">
+    <p>While enabled, agents cannot permanently delete mail, empty Trash, delete folders, use full-text indexes or reply reminders, or read server logs; they can move approved mail to Trash. Mail you send yourself is never labeled. Removing the label from a message hides it again.</p>
   </div>
 
   <div id="categories"></div>

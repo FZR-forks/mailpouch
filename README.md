@@ -740,3 +740,10 @@ MIT — see [LICENSE](LICENSE)
 *Unofficial third-party server. Not affiliated with or endorsed by Proton AG.*
 
 [GitHub](https://github.com/chandshy/mailpouch) · [npm](https://www.npmjs.com/package/mailpouch) · [Issues](https://github.com/chandshy/mailpouch/issues) · [Model Context Protocol](https://modelcontextprotocol.io)
+
+### Restrict agents to an AI label
+
+Settings → Permissions → **AI email access label** enables server-wide label-only
+mail access with automatic labeling of sent mail and drafts (replies via Proton's sticky labels). See [setup, behavior, and current
+limits](docs/ai-label-access.md). Configure the label before connecting agents;
+the restriction is opt-in.

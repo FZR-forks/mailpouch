@@ -161,6 +161,14 @@ export interface Contact {
 }
 
 export interface SendEmailOptions {
+  /** Proton SMTP verifies this belongs to the authenticated account. */
+  from?: string;
+  /**
+   * Access-label mailbox to apply to the Sent copy. Set only by the dispatcher
+   * (or the scheduler, from a record's provenance) for mail an agent sends under
+   * the policy; never from tool arguments. Absent means the copy stays unlabeled.
+   */
+  accessLabel?: string;
   to: string | string[];
   cc?: string | string[];
   bcc?: string | string[];
@@ -223,6 +231,8 @@ export interface SaveDraftOptions {
   attachments?: EmailAttachment[];
   inReplyTo?: string;
   references?: string[];
+  /** Server-generated Message-ID; set internally for durable draft labeling, never by tool arguments. */
+  messageId?: string;
 }
 
 /** A scheduled email queued for future delivery. */
@@ -249,6 +259,8 @@ export interface ScheduledEmail {
   createdAt: string; // ISO 8601
   error?: string;
   retryCount?: number;
+  /** Access-label policy under which an agent created this record; such agents only see their own records. */
+  labelScope?: string;
   /** ISO-8601 earliest time the next send attempt may run (per-item backoff). */
   nextAttemptAt?: string;
 }

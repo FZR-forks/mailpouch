@@ -1,3 +1,6 @@
+import { OutgoingLabelQueue } from "../services/outgoing-labels.js";
+import { currentAccessLabelFolder } from "../security/label-config.js";
+import { getConfigPath } from "../config/loader.js";
 /**
  * AccountManager — keeps one SimpleIMAPService + SMTPService per account
  * alive concurrently, supports hot-swapping the "active" account without
@@ -39,6 +42,8 @@ export interface AccountServices {
   imap: SimpleIMAPService;
   smtp: SMTPService;
   spec: AccountSpec;
+  /** Durable access-label work for this mailbox (sent copies and agent drafts). */
+  labels?: OutgoingLabelQueue;
 }
 
 export interface AccountsRebuiltEvent {
@@ -619,13 +624,30 @@ export class AccountManager extends EventEmitter {
     }
   }
 
+  /** Build isolated account services and a mailbox-bound outgoing labeling queue. */
   private createServices(spec: AccountSpec): AccountServices {
     const runtimeSpec = cloneAccountSpec(spec);
-    return {
+    const imap = new SimpleIMAPService();
+    // Fingerprint includes mailbox identity, preventing account-ID reuse from
+    // applying old work to a different mailbox. Each profile owns its queue.
+    const fingerprint = accountIdentityFingerprint(runtimeSpec);
+    const queue = new OutgoingLabelQueue(
+      `${getConfigPath()}.outgoing-labels-${fingerprint}.json`,
+      imap,
+      () => currentAccessLabelFolder()?.slice("Labels/".length),
+      async () => {
+        if (this.retiredServices.has(services)) throw new Error("Account was retired.");
+        if (!imap.isActive()) await this.connectAccount(runtimeSpec.id);
+        if (this.retiredServices.has(services)) throw new Error("Account was retired.");
+      },
+    );
+    const services: AccountServices = {
       spec: runtimeSpec,
-      imap: new SimpleIMAPService(),
-      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec)),
+      imap,
+      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec), queue),
+      labels: queue,
     };
+    return services;
   }
 }
 

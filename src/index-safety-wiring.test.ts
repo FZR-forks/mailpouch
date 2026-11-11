@@ -31,6 +31,16 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("re-reads the access policy after the destructive-confirm await, before dispatch", () => {
+    const elicit = source.indexOf("await server.elicitInput(");
+    const recheck = source.indexOf("const finalLabelFolder = requireLabelToolScope(");
+    const dispatch = source.indexOf("const scopedImap = labelScopedImap(");
+    expect(elicit).toBeGreaterThan(-1);
+    expect(recheck).toBeGreaterThan(elicit);
+    expect(recheck).toBeLessThan(dispatch);
+    expect(source).toMatch(/if \(finalLabelFolder !== aiLabelFolder\) \{\n\s*throw /);
+  });
+
   it("rejects unregistered tool names before the escalation pre-gate", () => {
     const reject = source.indexOf("if (!Object.hasOwn(_escalationHandlers, name) && !Object.hasOwn(_toolHandlers, name))");
     const escalation = source.indexOf("if (_escalationHandlers[name])");
@@ -52,7 +62,7 @@ describe("production safety wiring", () => {
   it("resources/prompts apply the global permission preset even for a trusted local caller", () => {
     const start = source.indexOf("function requireReadSurfaceAccess(");
     const body = source.slice(start, source.indexOf("const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);", start));
-    expect(body).toMatch(/if \(!caller\) \{[\s\S]*permissions\.check\(tool\)[\s\S]*return \{ accountId: activeAccountId, accountIdentity, services \};/);
+    expect(body).toMatch(/if \(!caller\) \{[\s\S]*permissions\.check\(tool\)[\s\S]*return \{ accountId: activeAccountId, accountIdentity, services, labelFolder, allowedFolders: labelAllowedFolders\(labelFolder\) \};/);
   });
 
   it("the native approval dialog only decides grants that are still pending", () => {
@@ -87,4 +97,34 @@ describe("production safety wiring", () => {
       /if \(error instanceof MailboxMutationDeadlineError\) return error\.message/,
     );
   });
+  it("does not read or derive broad background state when filtering is enabled or changes during a read", () => {
+    const start = source.indexOf("async function syncAccountBackground(");
+    const body = source.slice(start, source.indexOf("async function syncAllAccountsBackground(", start));
+    const read = body.indexOf('imap.getEmails("INBOX"');
+    expect(body.indexOf("if (currentAccessLabelFolder() || !imap.isActive()) return")).toBeLessThan(read);
+    const secondCheck = body.indexOf("if (currentAccessLabelFolder()) return", read);
+    expect(secondCheck).toBeGreaterThan(read);
+    for (const derived of ["accountRuntime.updateAnalytics", "accountRuntime.getFts", "reminderService.detectRepliesAndCancel"]) {
+      expect(secondCheck).toBeLessThan(body.indexOf(derived));
+    }
+  });
+  it("never names the access policy in agent-facing errors", () => {
+    // String literals only; comments may describe the policy.
+    expect(source).not.toMatch(/["'`][^"'`\n]*(access policy|AI access|access label)[^"'`\n]*["'`]/i);
+  });
+  it("revalidates all mail used by tool and resource/prompt handlers after their combined result is built", () => {
+    const tool = source.slice(source.indexOf("const scopedImap = labelScopedImap(routedImapService"));
+    const toolCheck = tool.indexOf("await assertLabelAccessCurrent(scopedImap)");
+    expect(toolCheck).toBeGreaterThan(tool.indexOf("const result = await executeMailTool({"));
+    expect(tool).toMatch(/executeMailTool\(\{\s*invoke: invokeHandler,\s*validate: async \(\) =>/);
+    expect(tool).toMatch(/deadline: ACCOUNT_MAIL_MUTATION_TOOLS\.has\(name\) \? \{/);
+    expect(toolCheck).toBeLessThan(tool.indexOf("currentAccessLabelFolder() !== aiLabelFolder"));
+    const surfaceStart = source.indexOf("async function readFromActiveSurface<T>(");
+    const surface = source.slice(surfaceStart, source.indexOf("function requireReadSurfaceAccess(", surfaceStart));
+    const surfaceCheck = surface.indexOf("await assertLabelAccessCurrent(scopedImap)");
+    expect(surfaceCheck).toBeGreaterThan(surface.indexOf("const result = await read(scopedImap)"));
+    expect(surfaceCheck).toBeLessThan(surface.lastIndexOf("if (!isStillActive())"));
+    expect(surfaceCheck).toBeLessThan(surface.indexOf("return result;"));
+  });
+
 });

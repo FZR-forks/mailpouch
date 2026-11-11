@@ -962,3 +962,24 @@ describe("POST /api/reset", () => {
     }
   });
 });
+
+describe("AI access label settings", () => {
+  it("persists the label and preserves it across unrelated settings patches", async () => {
+    const { port, close } = await listen(createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" }));
+    try {
+      const csrf = await csrfFrom(port);
+      expect((await saveSettingsPatch(port, csrf, { aiAccessLabel: "AI-Accessible" })).status).toBe(200);
+      await saveSettingsPatch(port, csrf, { settingsPort: 8767 });
+      expect(mocks.config!.aiAccessLabel).toBe("AI-Accessible");
+    } finally { close(); }
+  });
+  it.each([null, false, 42, "../Inbox", "Labels/AI", " AI ", "AI\nSent"])("rejects invalid label %j without broadening saved policy", async aiAccessLabel => {
+    mocks.config!.aiAccessLabel = "AI-Accessible";
+    const { port, close } = await listen(createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" }));
+    try {
+      expect((await saveSettingsPatch(port, await csrfFrom(port), { aiAccessLabel })).status).toBe(400);
+      expect(mocks.saveConfig).not.toHaveBeenCalled();
+      expect(mocks.config!.aiAccessLabel).toBe("AI-Accessible");
+    } finally { close(); }
+  });
+});

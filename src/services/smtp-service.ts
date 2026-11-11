@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { OutgoingLabeler } from "./outgoing-labels.js";
 /**
  * SMTP Service for sending emails via Proton Mail (through Proton Bridge or
  * direct submission).
@@ -86,7 +88,7 @@ export function escapeHtml(str: string): string {
 }
 
 /** Header keys that must never be overridden via caller-supplied headers */
-const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender)$/i;
+const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender|message-id)$/i;
 
 // Attachment count/size caps live in helpers.ts (validateAttachmentLimits),
 // shared with the IMAP saveDraft path.
@@ -121,7 +123,8 @@ export class SMTPService {
    */
   readonly backoff = new BackoffTracker();
 
-  constructor(config: ProtonMailConfig) {
+  /** Initialize this account's SMTP transport and optional outgoing-label lifecycle. */
+  constructor(config: ProtonMailConfig, private readonly outgoingLabels?: OutgoingLabeler) {
     this.config = config;
     this.initializeTransporter();
   }
@@ -542,6 +545,7 @@ export class SMTPService {
     }
 
     let dispatchedTransportGeneration: number | undefined;
+    let queuedMessageId: string | undefined;
     try {
       // Real Proton Bridge always uses a full email as the SMTP username
       // (e.g. "chuck@protonmail.com"), so `from: username` is a valid address.
@@ -555,8 +559,10 @@ export class SMTPService {
       const fromAddress = fromOverride && isValidEmail(fromOverride)
         ? fromOverride
         : this.config.smtp.username;
+      if (options.from !== undefined && !isValidEmail(options.from)) throw new Error("Invalid sender address.");
+
       const mailOptions: SendMailOptions = {
-        from: fromAddress,
+        from: options.from ?? fromAddress,
         to: toAddresses.join(", "),
         // Strip CRLF/NUL to prevent header injection via a crafted subject line.
         // reply_to_email already strips these from fetched subjects; this covers
@@ -633,10 +639,30 @@ export class SMTPService {
       // this closure and hard-closes the captured transport's active socket.
       const transporter = this.transporter;
       if (!transporter) throw new Error("SMTP transporter not initialized");
-      dispatchedTransportGeneration = this.transportGeneration;
+      // Persist the exact ID before SMTP, including ambiguous deliveries. Queue
+      // persistence or missing-label failures must stop delivery at this point.
+      if (this.outgoingLabels && options.accessLabel) {
+        const domain = /@([a-zA-Z0-9.-]+)$/.exec(String(mailOptions.from))?.[1] ?? "mailpouch.local";
+        const candidateId = `<${randomUUID()}@${domain}>`;
+        try {
+          if (await this.outgoingLabels.prepare(candidateId, options.accessLabel)) {
+            queuedMessageId = candidateId;
+            mailOptions.messageId = candidateId;
+          }
+        }
+        catch (error) {
+          if (error instanceof MailboxMutationDeadlineError) throw error;
+          logger.error("Outgoing mail preparation failed", "SMTPService", error);
+          throw new Error("Mailbox unavailable. Ask the account owner to check mail settings.");
+        }
+      }
+      if (transporter !== this.transporter) throw new Error("SMTP transport changed before delivery; retry the call.");
       const info = await runAccountMailMutation(
         this,
-        () => transporter.sendMail(mailOptions),
+        () => {
+          dispatchedTransportGeneration = this.transportGeneration;
+          return transporter.sendMail(mailOptions);
+        },
       );
       if (dispatchedTransportGeneration !== this.transportGeneration) {
         throw new MailboxMutationDeadlineError(
@@ -656,6 +682,16 @@ export class SMTPService {
         messageId: info.messageId,
       };
     } catch (error: unknown) {
+      // No delivery can exist before dispatch. After dispatch only a definitive
+      // rejection from the same live transport permits dropping the queued ID.
+      const responseCode = error && typeof error === "object" ? (error as { responseCode?: unknown }).responseCode : undefined;
+      const neverDispatched = dispatchedTransportGeneration === undefined;
+      const definitivelyRejected = dispatchedTransportGeneration === this.transportGeneration
+        && typeof responseCode === "number" && responseCode >= 400 && responseCode <= 599;
+      if (queuedMessageId && (neverDispatched || definitivelyRejected)) {
+        try { this.outgoingLabels!.discard(queuedMessageId); }
+        catch (cleanupError) { logger.warn("Could not discard unsent message's labeling job", "SMTPService", cleanupError); }
+      }
       // The request coordinator owns cancellation/outcome reporting. Do not
       // downgrade its typed error into an ordinary SMTP delivery failure.
       if (error instanceof MailboxMutationDeadlineError) throw error;
@@ -706,7 +742,8 @@ export class SMTPService {
    */
   async sendTestEmail(
     to: string,
-    customMessage?: string
+    customMessage?: string,
+    accessLabel?: string,
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
     logger.debug("Sending test email", "SMTPService", { to });
 
@@ -727,11 +764,13 @@ export class SMTPService {
       subject,
       body,
       isHtml: true,
+      ...(accessLabel ? { accessLabel } : {}),
     });
   }
 
   /** Close and release the SMTP transporter connection pool. */
   async close(): Promise<void> {
+    this.outgoingLabels?.stop();
     return tracer.span('smtp.close', {}, async () => {
     const hadAuthority = this.transporter !== null
       || this.smtpSockets.size > 0
@@ -767,6 +806,7 @@ export class SMTPService {
 
   /** Securely wipe credential strings from memory. */
   wipeCredentials(): void {
+    this.outgoingLabels?.stop();
     const retired = this.hardRetireTransport("credential wipe");
     if (this.config?.smtp) {
       if (this.config.smtp.password) this.config.smtp.password = "";

@@ -627,6 +627,24 @@ describe("saveConfig", () => {
     expect(mockedRenameSync).toHaveBeenCalledTimes(1);
   });
 
+  it("persists activation evidence before a restricted config and clears it only after explicit disable", () => {
+    const config = defaultConfig();
+    config.aiAccessLabel = "AI";
+    saveConfig(config);
+    let writes = mockedWriteFileSync.mock.calls.filter(([target]) => typeof target === "string");
+    expect(JSON.parse(writes[0][1] as string)).toEqual({ version: 1, enabled: true });
+    expect(JSON.parse(writes[1][1] as string).aiAccessLabel).toBe("AI");
+    expect(mockedRenameSync.mock.calls[0][1]).toBe(`${getConfigPath()}.label-policy.json`);
+    mockedWriteFileSync.mockClear();
+    mockedRenameSync.mockClear();
+    config.aiAccessLabel = "";
+    saveConfig(config);
+    writes = mockedWriteFileSync.mock.calls.filter(([target]) => typeof target === "string");
+    expect(JSON.parse(writes[0][1] as string).aiAccessLabel).toBe("");
+    expect(JSON.parse(writes[1][1] as string)).toEqual({ version: 1, enabled: false });
+    expect(mockedRenameSync.mock.calls[0][1]).toBe(getConfigPath());
+  });
+
   it("writes valid JSON containing the config", () => {
     const cfg = defaultConfig();
     cfg.connection.username = "testuser";

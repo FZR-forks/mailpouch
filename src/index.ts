@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { AnalyticsService } from "./services/analytics-service.js";
+import { currentAccessLabelFolder } from "./security/label-config.js";
+import { requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent, labelToolVisible, isNonMailTool } from "./security/label-access.js";
+import { executeMailTool } from "./services/mail-tool-execution.js";
 
 /**
  * Proton Mail MCP Server
@@ -45,7 +49,6 @@ import {
   MAILBOX_MUTATION_TOOLS,
   MailboxMutationDeadlineError,
   SMTP_MUTATION_TOOLS,
-  withMailboxMutationDeadline,
 } from "./services/mailbox-mutation-deadline.js";
 import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { SchedulerService } from "./services/scheduler.js";
@@ -894,6 +897,14 @@ function notifyActionPerformed(
   }
 }
 
+/** Grant denial text for agents; a reason naming the access label is not repeated. */
+function grantDenialText(reason: string | undefined, labelFolder: string | undefined): string {
+  return labelFolder && reason?.toLowerCase().includes(labelFolder.toLowerCase())
+    ? "Permission denied"
+    : `Blocked by agent grant: ${reason}`;
+}
+
+/** Register each session's tools, resources, and prompts with shared routing and authorization. */
 function registerHandlers(server: Server): void {
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const tier = activeToolTier();
@@ -913,7 +924,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8766) }
       : def,
   );
-  return { tools: defs.filter(t => visible.has(t.name)) };
+  // While the access-label policy is on (or unreadable), tools without a
+  // label-scoped form are not advertised, exactly as if they did not exist.
+  let labelPolicyOn: boolean;
+  try { labelPolicyOn = currentAccessLabelFolder() !== undefined; } catch { labelPolicyOn = true; }
+  return { tools: defs.filter(t => visible.has(t.name) && (!labelPolicyOn || labelToolVisible(t.name))) };
 });
 
 // ─── Tool Handlers ────────────────────────────────────────────────────────────
@@ -1018,6 +1033,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     }
   }
 
+  const caller = currentCaller() ?? localCaller();
+  const aiLabelFolder = requireLabelToolScope({
+    tool: name, args: args as Record<string, unknown>, caller,
+    readFolder: currentAccessLabelFolder, audit: agentAudit, errorMessage: safeErrorMessage,
+  });
+
   // ── Per-tool account routing ─────────────────────────────────────────────
   // The dispatcher resolves an optional `account_id` argument before the
   // gates so audit rows and permission checks both see the correct account.
@@ -1050,7 +1071,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   // per-agent grant: an unapproved one is blocked "pending user approval".
   // When local gating is disabled, localCaller() is undefined and stdio
   // bypasses (legacy auto-trust).
-  const caller = currentCaller() ?? localCaller();
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
@@ -1093,7 +1113,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       auditFailureRecorded = true;
       return {
-        content: [{ type: "text" as const, text: `Blocked by agent grant: ${grantResult.reason}` }],
+        content: [{ type: "text" as const, text: grantDenialText(grantResult.reason, aiLabelFolder) }],
         isError: true,
       };
     }
@@ -1182,6 +1202,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     } else {
       logger.info(`Destructive tool '${name}' executing with { confirmed: true }`, "MCPServer");
     }
+    // The dialog can stay open while the owner changes the access policy;
+    // never dispatch under the scope captured before it.
+    const finalLabelFolder = requireLabelToolScope({
+      tool: name, args: args as Record<string, unknown>, caller,
+      readFolder: currentAccessLabelFolder, audit: agentAudit, errorMessage: safeErrorMessage,
+    });
+    if (finalLabelFolder !== aiLabelFolder) {
+      throw new McpError(ErrorCode.InvalidRequest, "The account changed while this request was waiting for confirmation; retry the request.");
+    }
   }
 
   // Reserve a grant-scoped hourly slot only once every other pre-execution
@@ -1228,7 +1257,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       auditFailureRecorded = true;
       return {
-        content: [{ type: "text" as const, text: `Blocked by agent grant: ${reservationResult.reason}` }],
+        content: [{ type: "text" as const, text: grantDenialText(reservationResult.reason, aiLabelFolder) }],
         isError: true,
       };
     }
@@ -1308,25 +1337,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (!handler) {
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
+    const scopedImap = labelScopedImap(routedImapService, aiLabelFolder, {
+      drafts: routedAccountServices.labels,
+      messageIdDomain: /@([a-zA-Z0-9.-]+)$/.exec(configForAccount(routedAccountServices).smtp.username)?.[1],
+    });
+    const scopedAnalytics = aiLabelFolder ? new AnalyticsService() : undefined;
     const ctx: ToolCallContext = {
       args: args as Record<string, unknown>,
       accountId: requestedAccountId,
       accountIdentity: routedAccountIdentity,
-      imapService: routedImapService,
+      mailAccessLabel: aiLabelFolder,
+      imapService: scopedImap,
       smtpService: routedSmtpService,
       simpleloginService,
-      analyticsService: accountRuntime.getAnalyticsService(requestedAccountId),
+      analyticsService: scopedAnalytics ?? accountRuntime.getAnalyticsService(requestedAccountId),
       schedulerService,
       reminderService,
       passService,
       getFts: () => accountRuntime.getFts(requestedAccountId, routedAccountIdentity),
-      // Folder-allowlist accessor: trusted/stdio callers (no caller context)
-      // and static-bearer callers fall through to `undefined` (= no
-      // restriction), preserving existing behavior. OAuth callers with a
-      // folder-restricted grant return their allowlist for content-scoping.
+      // The global label boundary also applies to trusted local callers.
+      // Per-agent allowlists may narrow it further, never widen it.
       getCallerAllowedFolders: () => {
-        if (!authorizedGrant) return undefined;
-        return grantManager.resolveAllowedFolders(authorizedGrant);
+        return labelAllowedFolders(aiLabelFolder, authorizedGrant ? grantManager.resolveAllowedFolders(authorizedGrant) : undefined);
       },
       config: configForAccount(routedAccountServices),
       smtpStatus: accountRuntime.getSmtpStatus(requestedAccountId),
@@ -1341,7 +1373,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       sendProgress,
       encodeCursor,
       decodeCursor,
-      getAnalyticsEmails: () => getAnalyticsEmailsForAccount(requestedAccountId, routedImapService),
+      getAnalyticsEmails: async () => {
+        if (!scopedAnalytics) return getAnalyticsEmailsForAccount(requestedAccountId, routedImapService);
+        const inbox = await scopedImap.getEmails("INBOX", 200);
+        const sent = await scopedImap.getEmails("Sent", 100);
+        scopedAnalytics.updateEmails(inbox, sent);
+        return { inbox, sent };
+      },
       invalidateAnalytics: () => accountRuntime.invalidateAnalytics(requestedAccountId),
       recordFromEmail,
       launchProtonBridge,
@@ -1354,7 +1392,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       MAX_SUBJECT_LENGTH,
       state: sharedState,
     };
-    const invokeHandler = async () => {
+    const invokeHandler = async (recordMailDelivery: (messageId?: string) => void) => {
+      ctx.recordMailDelivery = recordMailDelivery;
       if (MAILBOX_MUTATION_TOOLS.has(name)) {
         await routedImapService.ensureMutationConnection();
       }
@@ -1363,8 +1402,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         () => handler(ctx),
       );
     };
-    const result = ACCOUNT_MAIL_MUTATION_TOOLS.has(name)
-      ? await withMailboxMutationDeadline({
+    const result = await executeMailTool({
+      invoke: invokeHandler,
+      validate: async () => {
+        await assertLabelAccessCurrent(scopedImap);
+        // Non-mail tools never read the mail policy, so a policy change cannot affect them.
+        if ((!isNonMailTool(name) && currentAccessLabelFolder() !== aiLabelFolder)
+            || !isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
+          logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
+            tool: name,
+            accountId: requestedAccountId,
+          });
+          throw new McpError(ErrorCode.InvalidRequest,
+            "The account changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.");
+        }
+      },
+      deadline: ACCOUNT_MAIL_MUTATION_TOOLS.has(name) ? {
         tool: name,
         signal: extra.signal,
         deadlineAt: mailboxMutationDeadlineAt,
@@ -1382,22 +1435,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             ),
           }] : []),
         ],
-      }, invokeHandler)
-      : await invokeHandler();
-    if (!isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
-      resultIsError = true;
-      logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
-        tool: name,
-        accountId: requestedAccountId,
-      });
-      return {
-        content: [{
-          type: "text" as const,
-          text: "The account changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.",
-        }],
-        isError: true,
-      };
-    }
+      } : undefined,
+    });
     resultIsError = result.isError === true;
     // Per-action security notification (debug aid) — debug-logs a successful
     // non-read-only action; also toasts it when "Surface security messages" is
@@ -1458,6 +1497,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
  * remote MCP clients.
  */
 interface ActiveReadSurfaceAccess {
+  labelFolder?: string;
   allowedFolders?: string[];
   accountId: string;
   accountIdentity: string;
@@ -1475,32 +1515,40 @@ async function readFromActiveSurface<T>(
   read: (imap: SimpleIMAPService) => Promise<T>,
 ): Promise<T> {
   const isStillActive = () => accountManager.activeAccountId() === access.accountId
-    && isCurrentAccountRoute(access.accountId, access.accountIdentity, access.services);
+    && isCurrentAccountRoute(access.accountId, access.accountIdentity, access.services)
+    && currentAccessLabelFolder() === access.labelFolder;
   if (!isStillActive()) {
     throw new McpError(ErrorCode.InvalidRequest, "The active account changed before this read could start. Retry after the switch completes.");
   }
-  const result = await read(access.services.imap);
+  const scopedImap = labelScopedImap(access.services.imap, access.labelFolder);
+  const result = await read(scopedImap);
+  await assertLabelAccessCurrent(scopedImap);
   if (!isStillActive()) {
     throw new McpError(ErrorCode.InvalidRequest, "The active account changed while this read was running, so its result was discarded.");
   }
   return result;
 }
 
+/** Authorize resource/prompt reads against the active account, caller grant, and live mail policy. */
 function requireReadSurfaceAccess(
   tool: ToolName,
   args: Record<string, unknown> = {},
 ): ActiveReadSurfaceAccess {
+  const caller = currentCaller() ?? localCaller();
+  const labelFolder = requireLabelToolScope({
+    tool: `read_surface:${tool}`, args: { ...args }, caller,
+    readFolder: currentAccessLabelFolder, audit: agentAudit, errorMessage: safeErrorMessage,
+  });
   const services = accountManager.getActive();
   const activeAccountId = services.spec.id;
   const accountIdentity = accountManager.identityForAccount(activeAccountId);
-  const caller = currentCaller() ?? localCaller();
   if (!caller) {
     // Trusted local mode has no per-agent grant, but the global preset still
     // applies — the tool dispatcher enforces it for every caller, and a
     // resource/prompt must not read what the equivalent tool may not.
     const trustedPermission = permissions.check(tool);
     if (!trustedPermission.allowed) throw new McpError(ErrorCode.InvalidRequest, `Blocked: ${trustedPermission.reason}`);
-    return { accountId: activeAccountId, accountIdentity, services };
+    return { accountId: activeAccountId, accountIdentity, services, labelFolder, allowedFolders: labelAllowedFolders(labelFolder) };
   }
 
   const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
@@ -1527,7 +1575,7 @@ function requireReadSurfaceAccess(
       blockedReason: grantResult.reason,
       ip: caller.ip,
     });
-    throw new McpError(ErrorCode.InvalidRequest, `Blocked by agent grant: ${grantResult.reason}`);
+    throw new McpError(ErrorCode.InvalidRequest, grantDenialText(grantResult.reason, labelFolder));
   }
 
   const permissionResult = permissions.check(tool);
@@ -1573,11 +1621,12 @@ function requireReadSurfaceAccess(
       blockedReason: reservationResult.reason,
       ip: caller.ip,
     });
-    throw new McpError(ErrorCode.InvalidRequest, `Blocked by agent grant: ${reservationResult.reason}`);
+    throw new McpError(ErrorCode.InvalidRequest, grantDenialText(reservationResult.reason, labelFolder));
   }
 
   return {
-    allowedFolders: reservationGrant ? grantManager.resolveAllowedFolders(reservationGrant) : undefined,
+    labelFolder,
+    allowedFolders: labelAllowedFolders(labelFolder, reservationGrant ? grantManager.resolveAllowedFolders(reservationGrant) : undefined),
     accountId: activeAccountId,
     accountIdentity,
     services,
@@ -2561,7 +2610,10 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
 async function syncAccountBackground(services: AccountServices): Promise<void> {
   const { imap, spec } = services;
   const accountId = spec.id;
-  if (!imap.isActive()) return;
+  // Filtered requests use live per-call data. Background FTS/reminder work
+  // cannot safely reuse old account-wide derived state while this mode is on.
+  try { if (currentAccessLabelFolder() || !imap.isActive()) return; }
+  catch { return; } // An unreadable policy must not start broad mailbox reads.
 
   // Hold both a runtime generation and the durable mailbox fingerprint while
   // the network read is outstanding. A settings edit can replace this account
@@ -2580,6 +2632,9 @@ async function syncAccountBackground(services: AccountServices): Promise<void> {
       imap.getEmails("INBOX", 50),
       imap.getEmails("Sent", 50),
     ]);
+    // The owner may enable filtering while IMAP is awaiting. Discard before
+    // updating analytics, indexes, or reminders under the previous policy.
+    if (currentAccessLabelFolder()) return;
     let stillCurrent = accountRuntime.isCurrentGeneration(accountId, generation);
     try {
       const current = accountManager.getForAccount(accountId);

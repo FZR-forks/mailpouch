@@ -104,6 +104,7 @@ export function buildGrantApprovalBody(
   };
 }
 
+/** Render the operator settings shell with its session token, CSP nonce, and tab-loading UI. */
 export function buildShellHtml(csrfToken: string, runningPort = 8766, cspNonce = ""): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
@@ -1853,6 +1854,7 @@ ${buildStyles(cspNonce)}
 
   function populatePermissions(c) {
     if (!c) return;
+    set('ai-access-label', c.aiAccessLabel || '');
     const perms = c.permissions || {};
     const tools = perms.tools || {};
     document.querySelectorAll('.preset-btn').forEach(b => {
@@ -1990,11 +1992,16 @@ ${buildStyles(cspNonce)}
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
       body: JSON.stringify({
         configResetGeneration: cfg?.configResetGeneration ?? 0,
+        aiAccessLabel: document.getElementById('ai-access-label').value,
         permissions: { preset, tools },
       }),
     });
     if (r.ok) { toast('Permissions saved. Changes take effect within 15 s.', 'ok'); await refresh(); }
-    else       { toast('Save failed.', 'err'); }
+    else {
+      const result = await r.json().catch(() => null);
+      const reason = typeof result?.error === 'string' && result.error.trim() ? result.error : r.status;
+      toast('Save failed: ' + reason, 'err');
+    }
   }
 
   // ── Status tab ────────────────────────────────────────────────────────────
