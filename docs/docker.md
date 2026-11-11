@@ -98,6 +98,12 @@ it over an SSH tunnel or VPN, or put a TLS reverse proxy (Caddy, nginx,
 Traefik) in front of it and set `MAILPOUCH_PUBLIC_URL` to the proxy's
 `https://` address.
 
+Inside the container every client, proxied or direct, appears to come from
+Docker's gateway address, because MailPouch only trusts `X-Forwarded-For` from
+a loopback peer. Agents are still told apart by their own OAuth identity, but
+per-agent IP pins cannot distinguish them, and the per-IP limit on the
+unauthenticated OAuth endpoints is shared by all clients.
+
 ## Maintenance
 
 - **Logs:** `docker compose logs -f mailpouch`. A healthy Bridge logs little.
