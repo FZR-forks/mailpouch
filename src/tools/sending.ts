@@ -213,6 +213,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const result = await smtpService.sendEmail({
       from: senderAddress(args.from),
+      accessLabel: ctx.mailAccessLabel,
       to: args.to as string,
       cc: args.cc as string | undefined,
       bcc: args.bcc as string | undefined,
@@ -224,7 +225,7 @@ export const handlers: Record<string, ToolHandler> = {
       attachments: sanitizeAttachments(args.attachments),
     });
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: result.error ?? "Email delivery failed" }], isError: true };
+      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
     ctx.recordMailDelivery?.(result.messageId);
     invalidateAnalytics();
@@ -283,6 +284,7 @@ export const handlers: Record<string, ToolHandler> = {
 
     const result = await smtpService.sendEmail({
       from: senderAddress(args.from),
+      accessLabel: ctx.mailAccessLabel,
       to: replyToAddress,
       cc: ccAddresses.length > 0 ? ccAddresses.join(", ") : undefined,
       subject,
@@ -293,7 +295,7 @@ export const handlers: Record<string, ToolHandler> = {
     });
 
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: result.error ?? "Email delivery failed" }], isError: true };
+      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
     ctx.recordMailDelivery?.(result.messageId);
     if (result.success) {
@@ -357,6 +359,7 @@ export const handlers: Record<string, ToolHandler> = {
 
     const fwdResult = await smtpService.sendEmail({
       from: senderAddress(args.from),
+      accessLabel: ctx.mailAccessLabel,
       to: args.to as string,
       subject: fwdSubject,
       body: fwdBody,
@@ -367,7 +370,7 @@ export const handlers: Record<string, ToolHandler> = {
     });
 
     if (!fwdResult.success) {
-      return { content: [{ type: "text" as const, text: fwdResult.error ?? "Forward failed" }], isError: true };
+      return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true };
     }
     ctx.recordMailDelivery?.(fwdResult.messageId);
     if (fwdResult.success) {
@@ -389,7 +392,8 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const result = await smtpService.sendTestEmail(
       args.to as string,
-      args.customMessage as string | undefined
+      args.customMessage as string | undefined,
+      ctx.mailAccessLabel,
     );
     if (!result.success) {
       return { content: [{ type: "text" as const, text: "Test email failed" }], isError: true };

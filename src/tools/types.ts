@@ -86,6 +86,12 @@ export interface ToolCallContext {
   /** Per-call resolved services (honor `account_id` routing). */
   imapService: SimpleIMAPService;
   smtpService: SMTPService;
+  /**
+   * Access-label mailbox while that policy is on. Persisted scheduler and
+   * reminder records carry it so only records created under the same policy
+   * are listed or changed. Internal routing only; never shown to the agent.
+   */
+  mailAccessLabel?: string;
   /** Record SMTP-confirmed delivery before any follow-up IMAP work; never call for an ambiguous or failed send. */
   recordMailDelivery?: (messageId?: string) => void;
 

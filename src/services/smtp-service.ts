@@ -641,11 +641,11 @@ export class SMTPService {
       if (!transporter) throw new Error("SMTP transporter not initialized");
       // Persist the exact ID before SMTP, including ambiguous deliveries. Queue
       // persistence or missing-label failures must stop delivery at this point.
-      if (this.outgoingLabels) {
+      if (this.outgoingLabels && options.accessLabel) {
         const domain = /@([a-zA-Z0-9.-]+)$/.exec(String(mailOptions.from))?.[1] ?? "mailpouch.local";
         const candidateId = `<${randomUUID()}@${domain}>`;
         try {
-          if (await this.outgoingLabels.prepare(candidateId)) {
+          if (await this.outgoingLabels.prepare(candidateId, options.accessLabel)) {
             queuedMessageId = candidateId;
             mailOptions.messageId = candidateId;
           }
@@ -742,7 +742,8 @@ export class SMTPService {
    */
   async sendTestEmail(
     to: string,
-    customMessage?: string
+    customMessage?: string,
+    accessLabel?: string,
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
     logger.debug("Sending test email", "SMTPService", { to });
 
@@ -763,6 +764,7 @@ export class SMTPService {
       subject,
       body,
       isHtml: true,
+      ...(accessLabel ? { accessLabel } : {}),
     });
   }
 

@@ -82,6 +82,35 @@ describe("draft scheduling and reminder account routing", () => {
   });
 });
 
+describe("scheduled mail created under the access-label policy", () => {
+  const policy = "Labels/AI-Accessible";
+  it("records provenance and lists or cancels only the policy's own scheduled mail", async () => {
+    const ownId = "0a0a0a0a-0000-4000-8000-000000000001";
+    const otherId = "0a0a0a0a-0000-4000-8000-000000000002";
+    const records = [
+      { id: ownId, scheduledAt: new Date().toISOString(), status: "pending", options: { to: "a@example.com", subject: "Agent" }, labelScope: policy },
+      { id: otherId, scheduledAt: new Date().toISOString(), status: "pending", options: { to: "b@example.com", subject: "Owner private" } },
+    ];
+    const schedule = vi.fn().mockReturnValue(ownId);
+    const list = vi.fn().mockReturnValue(records);
+    const cancel = vi.fn().mockReturnValue({ ok: true });
+    const schedulerService = { schedule, list, cancel } as unknown as ToolCallContext["schedulerService"];
+    const sendAt = new Date(Date.now() + 120_000).toISOString();
+    await mod.handlers.schedule_email(makeCtx({
+      args: { to: "a@example.com", subject: "Agent", body: "Body", send_at: sendAt }, schedulerService, mailAccessLabel: policy,
+    }));
+    expect(schedule).toHaveBeenCalledWith(expect.anything(), new Date(sendAt), "account-a", "mailbox-a-v1", policy);
+    const listed = await mod.handlers.list_scheduled_emails(makeCtx({ args: {}, schedulerService, mailAccessLabel: policy }));
+    expect((listed.structuredContent!.scheduled as Array<{ id: string }>).map(r => r.id)).toEqual([ownId]);
+    expect(JSON.stringify(listed)).not.toContain("Owner private");
+    const denied = await mod.handlers.cancel_scheduled_email(makeCtx({ args: { id: otherId }, schedulerService, mailAccessLabel: policy }));
+    expect(denied).toMatchObject({ isError: true, content: [{ text: "Not found" }] });
+    expect(cancel).not.toHaveBeenCalled();
+    await mod.handlers.cancel_scheduled_email(makeCtx({ args: { id: ownId }, schedulerService, mailAccessLabel: policy }));
+    expect(cancel).toHaveBeenCalledWith(ownId, "account-a");
+  });
+});
+
 describe("folder-restricted draft and reminder callers", () => {
   it("only probes allowlisted Proton scheduled-mail folders and filters returned records", async () => {
     const getEmails = vi.fn().mockResolvedValue([

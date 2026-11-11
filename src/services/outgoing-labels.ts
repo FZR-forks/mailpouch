@@ -7,11 +7,17 @@ import { withFileLock } from "../utils/file-lock.js";
 import { accessLabelFolder } from "../security/label-access.js";
 import { logger } from "../utils/logger.js";
 
-/** Legacy jobs omit createdAt until their first reconciliation after upgrade. */
-interface LabelJob { messageId: string; folder: string; createdAt?: number; needsAttentionAt?: number }
+/**
+ * Legacy jobs omit createdAt until their first reconciliation after upgrade.
+ * `mailbox: "drafts"` marks an agent-saved draft; absent means a sent message.
+ */
+interface LabelJob { messageId: string; folder: string; mailbox?: "drafts"; createdAt?: number; needsAttentionAt?: number }
 const MAX_JOB_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** A draft the owner deleted before labeling is not an operator problem; stop looking after a day. */
+const MAX_DRAFT_JOB_AGE_MS = 24 * 60 * 60 * 1000;
 export interface OutgoingLabeler {
-  prepare(messageId: string): Promise<boolean>;
+  /** Queue labeling with `folder`; returns false (no labeling) unless it is still the active access label. */
+  prepare(messageId: string, folder: string, mailbox?: "drafts"): Promise<boolean>;
   discard(messageId: string): void;
   stop(): void;
 }
@@ -37,6 +43,7 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
     if (!Array.isArray(jobs) || !jobs.every(j => j && typeof j.messageId === "string"
       && /^<[a-f0-9-]+@[a-zA-Z0-9.-]+>$/.test(j.messageId)
       && typeof j.folder === "string" && accessLabelFolder(j.folder.slice(7)) === j.folder
+      && (j.mailbox === undefined || j.mailbox === "drafts")
       && (j.createdAt === undefined || (typeof j.createdAt === "number" && Number.isFinite(j.createdAt) && j.createdAt >= 0))
       && (j.needsAttentionAt === undefined || (typeof j.needsAttentionAt === "number" && Number.isFinite(j.needsAttentionAt) && j.needsAttentionAt >= 0)))) {
       throw new Error("Invalid outgoing label queue; sending blocked until repaired.");
@@ -55,9 +62,9 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
   }
 
   /** Preflight the label and durably queue its Message-ID before SMTP dispatch. */
-  async prepare(messageId: string): Promise<boolean> {
-    const folder = accessLabelFolder(this.getLabel());
-    if (!folder) return false;
+  async prepare(messageId: string, folder: string, mailbox?: "drafts"): Promise<boolean> {
+    // A request authorized under an earlier policy must not label with a stale one.
+    if (accessLabelFolder(this.getLabel()) !== folder) return false;
     if (this.stopped) throw new Error("Outgoing label queue is retired.");
     await this.connect();
     const folders = await this.imap.syncFolders();
@@ -68,7 +75,7 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
     if (this.stopped) throw new Error("Outgoing label queue is retired.");
     this.update(jobs => {
       if (jobs.filter(job => job.needsAttentionAt === undefined).length >= 10_000) throw new Error("Outgoing label queue is full; resolve labeling failures before sending.");
-      return [...jobs, { messageId, folder, createdAt: Date.now() }];
+      return [...jobs, { messageId, folder, ...(mailbox ? { mailbox } : {}), createdAt: Date.now() }];
     });
     this.start();
     return true;
@@ -77,6 +84,11 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
   /** Forget only attempts whose SMTP response definitively rejected delivery. */
   discard(messageId: string): void {
     this.update(jobs => jobs.filter(job => job.messageId !== messageId));
+  }
+
+  /** Run one reconciliation pass now, e.g. right after saving a draft. */
+  async processNow(): Promise<void> {
+    await this.processPending();
   }
 
   /** Reconcile in the background without keeping a shutting-down process alive. */
@@ -97,6 +109,13 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
       let jobs = this.read();
       // Retain old attempts for operator recovery instead of silently dropping
       // labeling work. Retired records no longer retry or consume active capacity.
+      const draftExpired = (job: LabelJob) => job.mailbox === "drafts" && job.createdAt !== undefined
+        && now - job.createdAt >= MAX_DRAFT_JOB_AGE_MS;
+      if (jobs.some(draftExpired)) {
+        logger.warn("Dropped labeling for agent drafts that no longer exist", "OutgoingLabels");
+        this.update(current => current.filter(job => !draftExpired(job)));
+        jobs = this.read();
+      }
       if (jobs.some(job => job.needsAttentionAt === undefined
           && (job.createdAt === undefined || now - job.createdAt >= MAX_JOB_AGE_MS))) {
         const retired: string[] = [];
@@ -122,11 +141,15 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
       const sent = folders.find(f => f.specialUse === "\\Sent")?.path
         ?? folders.find(f => f.path === "Sent")?.path;
       if (!sent) throw new Error("Cannot resolve the Sent mailbox for outgoing labels.");
+      const drafts = folders.find(f => f.specialUse === "\\Drafts")?.path
+        ?? folders.find(f => f.path === "Drafts")?.path;
       let firstFailure: { error: unknown } | undefined;
       for (const job of pending) {
         if (this.stopped) return;
         try {
-          await this.processJob(job, sent);
+          // A draft may already have been sent from Proton; then its copy is in Sent.
+          const sources = job.mailbox === "drafts" ? [...(drafts ? [drafts] : []), sent] : [sent];
+          await this.processJob(job, sources);
         } catch (error) {
           firstFailure ??= { error };
         }
@@ -135,21 +158,27 @@ export class OutgoingLabelQueue implements OutgoingLabeler {
     } finally { this.running = false; }
   }
 
-  /** Resolve one exact Sent message; missing or unconfirmed copies remain queued. */
-  private async processJob(job: LabelJob, sent: string): Promise<void> {
+  /** Resolve one exact queued message; missing or unconfirmed copies remain queued. */
+  private async processJob(job: LabelJob, sources: string[]): Promise<void> {
     // Header SEARCH is a substring match; require exact Message-ID too.
     const find = async (folder: string) => (await this.imap.searchEmails({
       folder, header: { field: "Message-ID", value: job.messageId }, limit: 200,
-    }, true)).filter(m => m.messageId === job.messageId);
+    })).filter(m => m.messageId === job.messageId);
     if (!(await find(job.folder)).length) {
-      const messages = await find(sent);
-      if (!messages.length) return; // Sent can lag SMTP acceptance.
+      let source: string | undefined;
+      let messages: Awaited<ReturnType<typeof find>> = [];
+      for (const candidate of sources) {
+        messages = await find(candidate);
+        if (messages.length) { source = candidate; break; }
+      }
+      if (!source) return; // Sent can lag SMTP acceptance.
       for (const message of messages) {
         if (this.stopped) return;
         await withBackgroundAccountMailMutation({
           tool: "outgoing_label",
           transports: [{ scope: this.imap, abort: () => this.imap.abortPrimaryMutationTransport("Outgoing labeling cancelled") }],
-        }, () => this.imap.copyEmailToFolder(message.id, job.folder, sent));
+        }, () => this.imap.copyVerifiedToFolder(message.id, job.folder, source,
+          headers => headers.messageId === job.messageId.toLowerCase()));
       }
       if (!(await find(job.folder)).length) return;
     }

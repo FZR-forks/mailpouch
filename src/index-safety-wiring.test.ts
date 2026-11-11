@@ -98,13 +98,17 @@ describe("production safety wiring", () => {
       expect(secondCheck).toBeLessThan(body.indexOf(derived));
     }
   });
+  it("never names the access policy in agent-facing errors", () => {
+    // String literals only; comments may describe the policy.
+    expect(source).not.toMatch(/["'`][^"'`\n]*(access policy|AI access|access label)[^"'`\n]*["'`]/i);
+  });
   it("revalidates all mail used by tool and resource/prompt handlers after their combined result is built", () => {
     const tool = source.slice(source.indexOf("const scopedImap = labelScopedImap(routedImapService"));
     const toolCheck = tool.indexOf("await assertLabelAccessCurrent(scopedImap)");
     expect(toolCheck).toBeGreaterThan(tool.indexOf("const result = await executeMailTool({"));
     expect(tool).toMatch(/executeMailTool\(\{\s*invoke: invokeHandler,\s*validate: async \(\) =>/);
     expect(tool).toMatch(/deadline: ACCOUNT_MAIL_MUTATION_TOOLS\.has\(name\) \? \{/);
-    expect(toolCheck).toBeLessThan(tool.indexOf("if (currentAccessLabelFolder() !== aiLabelFolder"));
+    expect(toolCheck).toBeLessThan(tool.indexOf("currentAccessLabelFolder() !== aiLabelFolder"));
     const surfaceStart = source.indexOf("async function readFromActiveSurface<T>(");
     const surface = source.slice(surfaceStart, source.indexOf("function requireReadSurfaceAccess(", surfaceStart));
     const surfaceCheck = surface.indexOf("await assertLabelAccessCurrent(scopedImap)");

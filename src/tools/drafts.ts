@@ -94,6 +94,11 @@ function requireResolvedMailFolder(
  * cannot be proven within a restricted caller's mail scope. Do not mistake
  * an account ID match for folder provenance.
  */
+/** Under the access-label policy, only scheduled mail created under that same policy is visible or changeable. */
+function recordInPolicy(ctx: Parameters<ToolHandler>[0], record: { labelScope?: string }): boolean {
+  return ctx.mailAccessLabel === undefined || record.labelScope === ctx.mailAccessLabel;
+}
+
 function requireUnrestrictedPersistentRecordAccess(ctx: Parameters<ToolHandler>[0], operation: string): void {
   if (callerAllowedFolders(ctx) !== undefined) {
     throw new McpError(
@@ -435,7 +440,7 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, `'send_at' is not a valid date-time: '${args.send_at}'. Use ISO 8601 format, e.g. 2026-01-15T14:30:00Z.`);
     }
     try {
-      const schedId = schedulerService.schedule({
+      const scheduled: Parameters<typeof schedulerService.schedule>[0] = {
         from: args.from as string | undefined,
         to: args.to as string,
         cc: args.cc as string | undefined,
@@ -446,7 +451,11 @@ export const handlers: Record<string, ToolHandler> = {
         priority: args.priority as "high" | "normal" | "low" | undefined,
         replyTo: args.replyTo as string | undefined,
         attachments: sanitizeAttachments(args.attachments),
-      }, sendAt, accountId, accountIdentity);
+      };
+      // Policy provenance is recorded only while the access-label policy is on.
+      const schedId = ctx.mailAccessLabel === undefined
+        ? schedulerService.schedule(scheduled, sendAt, accountId, accountIdentity)
+        : schedulerService.schedule(scheduled, sendAt, accountId, accountIdentity, ctx.mailAccessLabel);
       return ok({ success: true, id: schedId, scheduledAt: sendAt.toISOString() },
         `Scheduled for ${sendAt.toISOString()} (ID: ${schedId})`);
     } catch (err: unknown) {
@@ -458,7 +467,7 @@ export const handlers: Record<string, ToolHandler> = {
   list_scheduled_emails: async (ctx) => {
     const { schedulerService, accountId, ok } = ctx;
     requireUnrestrictedPersistentRecordAccess(ctx, "list_scheduled_emails");
-    const allScheduled = schedulerService.list(accountId);
+    const allScheduled = schedulerService.list(accountId).filter(record => recordInPolicy(ctx, record));
     const summary = allScheduled.map(s => {
       const opts = s.options as unknown as Record<string, unknown>;
       const toField = opts?.to;
@@ -536,7 +545,10 @@ export const handlers: Record<string, ToolHandler> = {
     ) {
       throw new McpError(ErrorCode.InvalidParams, "id must be a valid UUID (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
     }
-    const result = schedulerService.cancel(rawCancelId, accountId);
+    const result = ctx.mailAccessLabel !== undefined
+        && !schedulerService.list(accountId).some(record => record.id === rawCancelId && recordInPolicy(ctx, record))
+      ? { ok: false as const, error: "not_found" as const }
+      : schedulerService.cancel(rawCancelId, accountId);
     if (result.ok) {
       return actionOk();
     }

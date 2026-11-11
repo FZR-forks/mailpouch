@@ -15,10 +15,16 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "mailpouch-labels-")); path 
 afterEach(() => { vi.restoreAllMocks(); queues.forEach(q => q.stop()); rmSync(dir, { recursive: true, force: true }); });
 function setup(label: unknown = "AI-Accessible") {
   const copies: string[][] = [];
-  const mailboxes = new Map<string, { id: string; messageId: string }[]>([["Envoyés", []], [folder, []]]);
+  const mailboxes = new Map<string, { id: string; messageId: string }[]>([["Envoyés", []], ["Brouillons", []], [folder, []]]);
   const imap = {
-    syncFolders: vi.fn(async () => [{ path: folder }, { path: "Envoyés", specialUse: "\\Sent" }]),
+    syncFolders: vi.fn(async () => [{ path: folder }, { path: "Envoyés", specialUse: "\\Sent" }, { path: "Brouillons", specialUse: "\\Drafts" }]),
     searchEmails: vi.fn(async (o: { folder: string }) => mailboxes.get(o.folder) ?? []),
+    // Identity-proven COPY: the predicate sees the source message's real headers.
+    copyVerifiedToFolder: vi.fn(async (uid: string, target: string, source: string, matches: (h: { messageId?: string; parents: string[] }) => boolean) => {
+      const message = mailboxes.get(source)?.find(m => m.id === uid);
+      if (!message || !matches({ messageId: message.messageId.toLowerCase(), parents: [] })) throw new Error("Mailbox changed during the request");
+      return imap.copyEmailToFolder(uid, target, source);
+    }),
     copyEmailToFolder: vi.fn(async (...args: string[]) => {
       copies.push(args);
       mailboxes.set(folder, [{ id: "77", messageId: id }]);
@@ -30,9 +36,36 @@ function setup(label: unknown = "AI-Accessible") {
   return { queue, imap, copies, mailboxes };
 }
 describe("durable outgoing labels", () => {
+  it("labels an agent draft in the localized Drafts mailbox, or in Sent once it was sent", async () => {
+    const { queue, mailboxes, imap } = setup();
+    await queue.prepare(id, folder, "drafts");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([{ messageId: id, folder, mailbox: "drafts", createdAt: expect.any(Number) }]);
+    mailboxes.set("Brouillons", [{ id: "3", messageId: id }]);
+    await queue.processNow();
+    expect(imap.copyEmailToFolder).toHaveBeenCalledWith("3", folder, "Brouillons");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([]);
+
+    const other = "<87654321-abcd@mailpouch.local>";
+    mailboxes.set(folder, []);
+    await queue.prepare(other, folder, "drafts");
+    mailboxes.set("Envoyés", [{ id: "9", messageId: other }]);
+    imap.copyEmailToFolder.mockImplementationOnce(async () => { mailboxes.set(folder, [{ id: "78", messageId: other }]); return true; });
+    await queue.processNow();
+    expect(imap.copyEmailToFolder).toHaveBeenLastCalledWith("9", folder, "Envoyés");
+  });
+  it("drops a missing draft's job after a day without flagging operator attention", async () => {
+    const { queue } = setup();
+    await queue.prepare(id, folder, "drafts");
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 25 * 60 * 60 * 1000);
+    await queue.processPending();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+
   it("persists before delivery, tolerates delayed Sent, and resumes after restart", async () => {
     const { queue, mailboxes, imap } = setup();
-    await queue.prepare(id);
+    await queue.prepare(id, folder);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([{ messageId: id, folder, createdAt: expect.any(Number) }]);
     await queue.processPending();
     expect(imap.copyEmailToFolder).not.toHaveBeenCalled();
@@ -46,7 +79,7 @@ describe("durable outgoing labels", () => {
   });
   it("retains a failed label operation for retry, without an SMTP dependency", async () => {
     const { queue, mailboxes, imap } = setup();
-    await queue.prepare(id);
+    await queue.prepare(id, folder);
     mailboxes.set("Envoyés", [{ id: "8", messageId: id }]);
     imap.copyEmailToFolder.mockRejectedValueOnce(new Error("Bridge offline"));
     await expect(queue.processPending()).rejects.toThrow("Bridge offline");
@@ -56,14 +89,14 @@ describe("durable outgoing labels", () => {
   });
   it("uses exact identity instead of authorizing substring matches", async () => {
     const { queue, mailboxes, imap } = setup();
-    await queue.prepare(id);
+    await queue.prepare(id, folder);
     mailboxes.set("Envoyés", [{ id: "8", messageId: `${id}.other` }]);
     await queue.processPending();
     expect(imap.copyEmailToFolder).not.toHaveBeenCalled();
   });
   it("never restores a label after successful labeling and user revocation", async () => {
     const { queue, mailboxes, imap } = setup();
-    await queue.prepare(id);
+    await queue.prepare(id, folder);
     mailboxes.set(folder, [{ id: "8", messageId: id }]);
     await queue.processPending();
     mailboxes.set(folder, []);
@@ -73,9 +106,9 @@ describe("durable outgoing labels", () => {
   it("blocks delivery preparation if the label or durable queue is unavailable", async () => {
     const { queue, imap } = setup();
     imap.syncFolders.mockResolvedValueOnce([]);
-    await expect(queue.prepare(id)).rejects.toThrow("Mailbox unavailable");
+    await expect(queue.prepare(id, folder)).rejects.toThrow("Mailbox unavailable");
     writeFileSync(path, "corrupt");
-    await expect(queue.prepare(id)).rejects.toThrow();
+    await expect(queue.prepare(id, folder)).rejects.toThrow();
   });
 });
 
@@ -84,8 +117,8 @@ describe("outgoing job isolation and age limit", () => {
   it("finishes later jobs in the same tick before rethrowing the first job failure", async () => {
     const { queue, mailboxes, imap } = setup();
     const nextId = "<abcdefab-1234@mailpouch.local>";
-    await queue.prepare(id);
-    await queue.prepare(nextId);
+    await queue.prepare(id, folder);
+    await queue.prepare(nextId, folder);
     mailboxes.set("Envoyés", [{ id: "8", messageId: id }, { id: "9", messageId: nextId }]);
     imap.copyEmailToFolder.mockImplementation(async (uid: string) => {
       if (uid === "8") throw new Error("First job failed");
@@ -132,22 +165,37 @@ describe("outgoing job isolation and age limit", () => {
     writeFileSync(path, JSON.stringify(Array.from({ length: 10_000 }, (_, i) => ({
       messageId: `<${i.toString(16)}@mailpouch.local>`, folder, createdAt: 0, needsAttentionAt: 1,
     }))));
-    await expect(queue.prepare(id)).resolves.toBe(true);
+    await expect(queue.prepare(id, folder)).resolves.toBe(true);
     expect(JSON.parse(readFileSync(path, "utf8"))).toHaveLength(10_001);
   });
 });
 
 
 describe("outgoing label activation and rejected sends", () => {
-  it("reports disabled labeling without creating a durable job", async () => {
-    const { queue, imap } = setup("");
-    expect(await queue.prepare(id)).toBe(false);
-    expect(imap.syncFolders).not.toHaveBeenCalled();
-    expect(existsSync(path)).toBe(false);
+  it("reports disabled or changed labeling without creating a durable job", async () => {
+    for (const current of ["", "Other-Label"]) {
+      const { queue, imap } = setup(current);
+      expect(await queue.prepare(id, folder)).toBe(false);
+      expect(imap.syncFolders).not.toHaveBeenCalled();
+      expect(existsSync(path)).toBe(false);
+    }
+  });
+  it("never labels a different message that reuses a queued UID", async () => {
+    const { queue, mailboxes, imap } = setup();
+    await queue.prepare(id, folder);
+    mailboxes.set("Envoyés", [{ id: "8", messageId: id }]);
+    // The mailbox is rebuilt between the search and the COPY: UID 8 is now other mail.
+    imap.copyVerifiedToFolder.mockImplementationOnce(async (uid, target, source, matches) => {
+      expect(matches({ messageId: "<private@example.com>", parents: [] })).toBe(false);
+      throw new Error("Mailbox changed during the request");
+    });
+    await expect(queue.processPending()).rejects.toThrow("Mailbox changed");
+    expect(imap.copyEmailToFolder).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveLength(1);
   });
   it("discards definitively rejected attempts from persistent state", async () => {
     const { queue } = setup();
-    expect(await queue.prepare(id)).toBe(true);
+    expect(await queue.prepare(id, folder)).toBe(true);
     queue.discard(id);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual([]);
     await queue.processPending();

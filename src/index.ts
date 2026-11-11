@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { AnalyticsService } from "./services/analytics-service.js";
 import { currentAccessLabelFolder } from "./security/label-config.js";
-import { requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent } from "./security/label-access.js";
+import { requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent, labelToolVisible, isNonMailTool } from "./security/label-access.js";
 import { executeMailTool } from "./services/mail-tool-execution.js";
 
 /**
@@ -897,6 +897,13 @@ function notifyActionPerformed(
   }
 }
 
+/** Grant denial text for agents; a reason naming the access label is not repeated. */
+function grantDenialText(reason: string | undefined, labelFolder: string | undefined): string {
+  return labelFolder && reason?.toLowerCase().includes(labelFolder.toLowerCase())
+    ? "Permission denied"
+    : `Blocked by agent grant: ${reason}`;
+}
+
 /** Register each session's tools, resources, and prompts with shared routing and authorization. */
 function registerHandlers(server: Server): void {
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -917,7 +924,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8766) }
       : def,
   );
-  return { tools: defs.filter(t => visible.has(t.name)) };
+  // While the access-label policy is on (or unreadable), tools without a
+  // label-scoped form are not advertised, exactly as if they did not exist.
+  let labelPolicyOn: boolean;
+  try { labelPolicyOn = currentAccessLabelFolder() !== undefined; } catch { labelPolicyOn = true; }
+  return { tools: defs.filter(t => visible.has(t.name) && (!labelPolicyOn || labelToolVisible(t.name))) };
 });
 
 // ─── Tool Handlers ────────────────────────────────────────────────────────────
@@ -1102,7 +1113,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       auditFailureRecorded = true;
       return {
-        content: [{ type: "text" as const, text: aiLabelFolder && grantResult.reason?.toLowerCase().includes(aiLabelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${grantResult.reason}` }],
+        content: [{ type: "text" as const, text: grantDenialText(grantResult.reason, aiLabelFolder) }],
         isError: true,
       };
     }
@@ -1237,7 +1248,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       auditFailureRecorded = true;
       return {
-        content: [{ type: "text" as const, text: aiLabelFolder && reservationResult.reason?.toLowerCase().includes(aiLabelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${reservationResult.reason}` }],
+        content: [{ type: "text" as const, text: grantDenialText(reservationResult.reason, aiLabelFolder) }],
         isError: true,
       };
     }
@@ -1317,12 +1328,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (!handler) {
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
-    const scopedImap = labelScopedImap(routedImapService, aiLabelFolder);
+    const scopedImap = labelScopedImap(routedImapService, aiLabelFolder, {
+      drafts: routedAccountServices.labels,
+      messageIdDomain: /@([a-zA-Z0-9.-]+)$/.exec(configForAccount(routedAccountServices).smtp.username)?.[1],
+    });
     const scopedAnalytics = aiLabelFolder ? new AnalyticsService() : undefined;
     const ctx: ToolCallContext = {
       args: args as Record<string, unknown>,
       accountId: requestedAccountId,
       accountIdentity: routedAccountIdentity,
+      mailAccessLabel: aiLabelFolder,
       imapService: scopedImap,
       smtpService: routedSmtpService,
       simpleloginService,
@@ -1382,14 +1397,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       invoke: invokeHandler,
       validate: async () => {
         await assertLabelAccessCurrent(scopedImap);
-        if (currentAccessLabelFolder() !== aiLabelFolder
+        // Non-mail tools never read the mail policy, so a policy change cannot affect them.
+        if ((!isNonMailTool(name) && currentAccessLabelFolder() !== aiLabelFolder)
             || !isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
           logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
             tool: name,
             accountId: requestedAccountId,
           });
           throw new McpError(ErrorCode.InvalidRequest,
-            "The account or AI access policy changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.");
+            "The account changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.");
         }
       },
       deadline: ACCOUNT_MAIL_MUTATION_TOOLS.has(name) ? {
@@ -1550,7 +1566,7 @@ function requireReadSurfaceAccess(
       blockedReason: grantResult.reason,
       ip: caller.ip,
     });
-    throw new McpError(ErrorCode.InvalidRequest, labelFolder && grantResult.reason?.toLowerCase().includes(labelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${grantResult.reason}`);
+    throw new McpError(ErrorCode.InvalidRequest, grantDenialText(grantResult.reason, labelFolder));
   }
 
   const permissionResult = permissions.check(tool);
@@ -1596,7 +1612,7 @@ function requireReadSurfaceAccess(
       blockedReason: reservationResult.reason,
       ip: caller.ip,
     });
-    throw new McpError(ErrorCode.InvalidRequest, labelFolder && reservationResult.reason?.toLowerCase().includes(labelFolder.toLowerCase()) ? "Permission denied" : `Blocked by agent grant: ${reservationResult.reason}`);
+    throw new McpError(ErrorCode.InvalidRequest, grantDenialText(reservationResult.reason, labelFolder));
   }
 
   return {

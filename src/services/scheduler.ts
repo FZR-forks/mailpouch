@@ -145,6 +145,7 @@ function isValidRecord(r: unknown): r is StoredScheduledEmail {
     const accountIdentity = normalizeAccountIdentity(o.accountIdentity);
     if (!accountIdentity || accountIdentity !== o.accountIdentity) return false;
   }
+  if (o.labelScope !== undefined && typeof o.labelScope !== "string") return false;
   return true;
 }
 
@@ -386,7 +387,7 @@ export class SchedulerService {
    * @throws If `sendAt` is not in the valid window [now+60s, now+30d].
    * @returns The assigned scheduled email ID.
    */
-  schedule(options: SendEmailOptions, sendAt: Date, accountId?: string, accountIdentity?: string): string {
+  schedule(options: SendEmailOptions, sendAt: Date, accountId?: string, accountIdentity?: string, labelScope?: string): string {
     return tracer.spanSync('scheduler.schedule', { sendAtMs: sendAt.getTime(), hasAttachments: !!(options.attachments?.length) }, () => {
     const now = Date.now();
     const delta = sendAt.getTime() - now;
@@ -411,6 +412,7 @@ export class SchedulerService {
       options,
       status: "pending",
       createdAt: new Date().toISOString(),
+      ...(labelScope ? { labelScope } : {}),
     };
 
     // Fail the call if the record doesn't reach disk: a returned id for an
@@ -600,7 +602,12 @@ export class SchedulerService {
                 `shared cancellation while scheduled email ${item.id} was in flight`,
               ),
             }],
-          }, () => smtpService.sendEmail(item.options));
+          }, () => smtpService.sendEmail({
+            ...item.options,
+            // Only records an agent created under the policy are labeled; this
+            // also overrides any label field in the stored options.
+            accessLabel: item.labelScope,
+          }));
           // SMTP-001: a cancel() landing between the await and this assignment
           // flips item.status to "cancelled" — respect that signal and don't
           // clobber it back to "sent"/"failed".

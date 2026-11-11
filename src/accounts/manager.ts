@@ -1,4 +1,5 @@
-import { OutgoingLabelQueue } from "../services/outgoing-labels.js";
+import { OutgoingLabelQueue, type OutgoingLabeler } from "../services/outgoing-labels.js";
+import { ReplyLabeler } from "../services/reply-labels.js";
 import { currentAccessLabelFolder } from "../security/label-config.js";
 import { getConfigPath } from "../config/loader.js";
 /**
@@ -42,6 +43,8 @@ export interface AccountServices {
   imap: SimpleIMAPService;
   smtp: SMTPService;
   spec: AccountSpec;
+  /** Durable access-label work for this mailbox (sent copies and agent drafts). */
+  labels?: OutgoingLabelQueue;
 }
 
 export interface AccountsRebuiltEvent {
@@ -628,8 +631,9 @@ export class AccountManager extends EventEmitter {
     const imap = new SimpleIMAPService();
     // Fingerprint includes mailbox identity, preventing account-ID reuse from
     // applying old work to a different mailbox. Each profile owns its queue.
+    const fingerprint = accountIdentityFingerprint(runtimeSpec);
     const queue = new OutgoingLabelQueue(
-      `${getConfigPath()}.outgoing-labels-${accountIdentityFingerprint(runtimeSpec)}.json`,
+      `${getConfigPath()}.outgoing-labels-${fingerprint}.json`,
       imap,
       () => currentAccessLabelFolder()?.slice("Labels/".length),
       async () => {
@@ -638,10 +642,21 @@ export class AccountManager extends EventEmitter {
         if (this.retiredServices.has(services)) throw new Error("Account was retired.");
       },
     );
+    // Replies to approved mail are labeled in the background; it never
+    // connects on its own and does nothing while the policy is off.
+    const replies = new ReplyLabeler(`${getConfigPath()}.reply-labels-${fingerprint}.json`, imap, () => currentAccessLabelFolder());
+    replies.start();
+    // SMTP close/credential wipe retires both workers with the account.
+    const labeler: OutgoingLabeler = {
+      prepare: (messageId, folder, mailbox) => queue.prepare(messageId, folder, mailbox),
+      discard: messageId => queue.discard(messageId),
+      stop: () => { queue.stop(); replies.stop(); },
+    };
     const services: AccountServices = {
       spec: runtimeSpec,
       imap,
-      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec), queue),
+      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec), labeler),
+      labels: queue,
     };
     return services;
   }
