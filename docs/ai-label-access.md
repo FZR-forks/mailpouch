@@ -161,8 +161,9 @@ Verified against Proton Bridge 3.27.1 (2026-11-11, isolated test account): every
 message carries `X-Pm-Internal-Id`, identical across Inbox, All Mail, and the
 label; COPY into `Labels/<name>` applies the label without duplicating the
 message; archive, trash, and restore keep the label; and, through the MCP server,
-items 1–3, 5 (with owner replies), and 6 below. Bridge lists All Mail without the
-`\All` flag. Item 4 (restart during labeling) is not yet verified live.
+every item below, including a reply from an outside mailbox (Proton delivers the
+generated Message-ID unchanged) and a server restart during a Bridge outage
+(labeled once, never resent). Bridge lists All Mail without the `\All` flag.
 
 To re-verify, for example after a Bridge upgrade, use an isolated test account:
 
