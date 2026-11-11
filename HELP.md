@@ -23,7 +23,7 @@ Other useful commands:
 |---|---|
 | `mailpouch --help` | Show commands, flags, and config/log paths |
 | `mailpouch setup …` | Configure Bridge credentials non-interactively |
-| `mailpouch agent issue/list/revoke/prune` | Manage headless service accounts |
+| `mailpouch agent issue/list/approve/revoke/prune` | Manage agents and service accounts |
 | `mailpouch daemon [--host H] [--port P]` | Run the shared OAuth HTTP daemon |
 
 Running `mailpouch` with no command starts the stdio MCP server. An MCP client

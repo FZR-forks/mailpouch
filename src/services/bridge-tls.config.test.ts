@@ -13,6 +13,17 @@ describe("buildBridgeTlsConfig", () => {
     expect(r.tlsOptions).toEqual({ minVersion: "TLSv1.2" });
   });
 
+  it("remote host + pinned cert → trusts only that cert (Bridge in another container)", () => {
+    const r = buildBridgeTlsConfig("protonmail-bridge", CERT, false);
+    expect(r.insecure).toBe(false);
+    expect((r.tlsOptions as { ca?: unknown[] }).ca).toHaveLength(1);
+  });
+
+  it("remote host + unreadable pinned cert → throws even with allowInsecure", () => {
+    expect(() => buildBridgeTlsConfig("protonmail-bridge", "/no/such/cert.pem", true))
+      .toThrow(/could not be loaded/);
+  });
+
   it("localhost + valid pinned cert → trusts it, secure, info log", () => {
     const r = buildBridgeTlsConfig("localhost", CERT, false);
     expect(r.insecure).toBe(false);

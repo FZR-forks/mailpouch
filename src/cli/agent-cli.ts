@@ -4,6 +4,7 @@
  *
  *   mailpouch agent issue  --name <n> --preset <preset> [--expires <iso>] [--folder a,b]
  *   mailpouch agent list
+ *   mailpouch agent approve <client_id> --preset <preset>
  *   mailpouch agent revoke <client_id>
  *   mailpouch agent prune  [--days <n>] [--dry-run]
  *
@@ -31,6 +32,7 @@ export interface AgentCliDeps {
 const USAGE = `Usage:
   mailpouch agent issue --name <name> --preset <${PERMISSION_PRESETS.join("|")}> [--expires <iso8601>] [--folder a,b,c]
   mailpouch agent list
+  mailpouch agent approve <client_id> --preset <${PERMISSION_PRESETS.join("|")}>
   mailpouch agent revoke <client_id>
   mailpouch agent prune [--days <n>] [--dry-run]`;
 
@@ -132,6 +134,22 @@ export async function runAgentCli(argv: string[], deps: AgentCliDeps): Promise<n
       }
       out("");
       out("Revoked/expired grants are hidden; clear them with `mailpouch agent prune`.");
+      return 0;
+    }
+
+    case "approve": {
+      // The headless counterpart of the Agents tab's Approve button, for an
+      // interactive OAuth client that registered and is waiting. The preset is
+      // required: approving must never silently grant a default.
+      const clientId = positional[0] ?? flags.id;
+      const preset = flags.preset?.trim() as PermissionPreset | undefined;
+      if (!clientId) { err("error: approve requires a client_id."); err(USAGE); return 2; }
+      if (!preset || !PERMISSION_PRESETS.includes(preset)) {
+        err(`error: --preset must be one of ${PERMISSION_PRESETS.join(", ")}.`); err(USAGE); return 2;
+      }
+      const grant = deps.agentGrants.approve({ clientId, preset, onlyIfPending: true });
+      if (!grant) { err(`error: no pending agent ${clientId}. Run \`mailpouch agent list\`.`); return 1; }
+      out(`Approved ${clientId} ("${grant.clientName}") with preset ${preset}.`);
       return 0;
     }
 

@@ -131,6 +131,20 @@ describe("mailpouch agent CLI", () => {
     expect(h.agentGrants.get(id)).toBeDefined(); // nothing removed
   });
 
+  it("approve activates a pending interactive agent only with an explicit preset", async () => {
+    const h = harness();
+    h.agentGrants.createPending({ clientId: "pmc_waiting", clientName: "Claude Code" });
+    expect(await runAgentCli(["approve", "pmc_waiting"], h.deps)).toBe(2);
+    expect(h.agentGrants.get("pmc_waiting")?.status).toBe("pending");
+    expect(await runAgentCli(["approve", "pmc_waiting", "--preset", "supervised"], h.deps)).toBe(0);
+    expect(h.agentGrants.get("pmc_waiting")).toMatchObject({ status: "active", preset: "supervised" });
+    expect(h.out.join("\n")).toContain('Approved pmc_waiting ("Claude Code") with preset supervised.');
+    // Only pending agents: a revoked one is not silently re-activated.
+    h.agentGrants.revoke("pmc_waiting");
+    expect(await runAgentCli(["approve", "pmc_waiting", "--preset", "full"], h.deps)).toBe(1);
+    expect(h.agentGrants.get("pmc_waiting")?.status).toBe("revoked");
+  });
+
   it("revoke removes the account and revokes the grant", async () => {
     const h = harness();
     await runAgentCli(["issue", "--name", "kill", "--preset", "full"], h.deps);

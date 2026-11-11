@@ -78,7 +78,10 @@ export function buildBridgeTlsConfig(
   const logs: BridgeTlsConfig["logs"] = [];
   const insecureOpts = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
 
-  if (!isLocalhost) {
+  // A remote host uses standard validation unless a Bridge cert is pinned
+  // explicitly (e.g. Bridge in another container). The pin is then the only
+  // trust anchor, so it is no weaker than on localhost.
+  if (!isLocalhost && !bridgeCertPath) {
     return { tlsOptions: { minVersion: "TLSv1.2" }, insecure: false, logs };
   }
 
@@ -95,7 +98,8 @@ export function buildBridgeTlsConfig(
       logs.push({ level: "info", msg: `Using exported Bridge certificate for TLS trust (${resolved})` });
       return { tlsOptions, insecure: false, logs };
     } catch (err) {
-      if (!allowInsecure) {
+      // Never disable validation for a remote host.
+      if (!allowInsecure || !isLocalhost) {
         throw new Error(
           `Bridge cert at "${resolved}" could not be loaded and allowInsecureBridge is not set. ` +
           `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
