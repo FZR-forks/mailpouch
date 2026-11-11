@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { accessLabelFolder, scopeLabelTool, requireLabelToolScope, labelAllowedFolders, labelScopedImap } from "./label-access.js";
+import { accessLabelFolder, scopeLabelTool, requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent } from "./label-access.js";
 import { SimpleIMAPService } from "../services/simple-imap-service.js";
 import { handlers as reading } from "../tools/reading.js";
 import type { ToolCallContext } from "../tools/types.js";
@@ -169,8 +169,8 @@ describe("transparent backend mail filter", () => {
     expect(JSON.stringify(await reading.list_labels(ctx))).toContain("Work");
     expect(JSON.stringify(await reading.list_labels(ctx))).not.toContain("AI-Accessible");
   });
-  it.each(["getFolders", "syncFolders", "wildcard search", "multi-folder search", "lookup without a folder"])(
-    "lists folders and scans the access label once per %s operation", async operation => {
+  it.each(["getFolders", "syncFolders", "wildcard search", "wildcard all search", "multi-folder search", "lookup without a folder"])(
+    "lists folders once and bounds label/source scans per %s operation", async operation => {
       const { view, imap, client, mailboxes, generations, approved } = fixture();
       // Exercise an account with many labels; folder-listing cost must stay constant.
       for (let i = 0; i < 30; i++) {
@@ -182,19 +182,26 @@ describe("transparent backend mail filter", () => {
       if (operation === "getFolders") expect(await view.getFolders()).toHaveLength(paths.length);
       else if (operation === "syncFolders") expect(await view.syncFolders()).toHaveLength(paths.length);
       else if (operation === "wildcard search") await view.searchEmails({ folders: ["*"] });
+      else if (operation === "wildcard all search") await view.searchEmails({ folder: "all" });
       else if (operation === "multi-folder search") await view.searchEmails({ folders: paths });
       else expect(await view.getEmailById("999")).toBeNull();
       expect(imap.syncFolders).toHaveBeenCalledTimes(1);
       expect(client.list).toHaveBeenCalledTimes(1);
       const scanned = client.getMailboxLock.mock.calls.map(([path]) => path);
-      expect(scanned.filter(path => path === folder)).toHaveLength(1);
-      for (const path of paths) expect(scanned).toContain(path);
+      // One shared authorization snapshot and one final membership check,
+      // independent of the number of folders. Searches only scan their first 20.
+      expect(scanned.filter(path => path === folder)).toHaveLength(2);
+      const expected = operation.includes("search") ? paths.slice(0, 20) : paths;
+      for (const path of paths) {
+        if (expected.includes(path)) expect(scanned).toContain(path);
+        else expect(scanned).not.toContain(path);
+      }
     },
   );
   it("stops a folderless lookup at the first approved match without scanning later folders", async () => {
     const { view, client } = fixture();
     expect((await view.getEmailById("42"))?.folder).toBe("INBOX");
-    expect(client.getMailboxLock.mock.calls.map(([path]) => path)).toEqual([folder, "INBOX", "INBOX"]);
+    expect(client.getMailboxLock.mock.calls.map(([path]) => path)).toEqual([folder, "INBOX", "INBOX", folder]);
   });
   it("refreshes label membership between multi-folder operations", async () => {
     const { view, client, mailboxes } = fixture();
@@ -202,7 +209,96 @@ describe("transparent backend mail filter", () => {
     mailboxes.set(folder, []);
     expect((await view.getFolders()).map(entry => entry.totalMessages)).toEqual([0, 0, 0]);
     expect(await view.searchEmails({ folders: ["*"] })).toEqual([]);
-    expect(client.getMailboxLock.mock.calls.filter(([path]) => path === folder)).toHaveLength(3);
+    expect(client.getMailboxLock.mock.calls.filter(([path]) => path === folder)).toHaveLength(6);
+  });
+  it.each(["list", "lookup", "search", "attachment"])("discards %s results if the label is removed during body retrieval", async operation => {
+    const { view, client, mailboxes } = fixture();
+    const fetch = client.fetch.getMockImplementation()!;
+    client.fetch.mockImplementation(async function* (...args) {
+      try { yield* fetch(...args); }
+      finally { if (args[1].source || !args[1].headers) mailboxes.set(folder, []); }
+    });
+    const result = operation === "list" ? view.getEmails("INBOX")
+      : operation === "lookup" ? view.getEmailById("42", "INBOX")
+        : operation === "search" ? view.searchEmails({ folders: ["INBOX", "Sent"] })
+          : view.downloadAttachment("42", 0, "INBOX");
+    await expect(result).rejects.toThrow("Mailbox temporarily unavailable");
+  });
+  it.each(["getFolders", "syncFolders", "later-folder lookup"])("discards %s results after revocation while scanning later folders", async operation => {
+    const { view, client, mailboxes } = fixture();
+    const lock = client.getMailboxLock.getMockImplementation()!;
+    client.getMailboxLock.mockImplementation(async path => {
+      if (path === "Sent") mailboxes.set(folder, []);
+      return lock(path);
+    });
+    const result = operation === "getFolders" ? view.getFolders()
+      : operation === "syncFolders" ? view.syncFolders() : view.getEmailById("8");
+    await expect(result).rejects.toThrow("Mailbox temporarily unavailable");
+  });
+  it("revalidates membership after the attachment source is downloaded", async () => {
+    const { view, imap, mailboxes } = fixture();
+    const download = imap.downloadAttachment.bind(imap);
+    vi.spyOn(imap, "downloadAttachment").mockImplementation(async (...args) => {
+      const attachment = await download(...args);
+      expect(attachment).not.toBeNull();
+      mailboxes.set(folder, []);
+      return attachment;
+    });
+    await expect(view.downloadAttachment("42", 0, "INBOX")).rejects.toThrow("Mailbox temporarily unavailable");
+  });
+  it("discards results if the access mailbox changes identity, membership, or availability during a read", async () => {
+    for (const change of ["rebuild", "replace membership", "delete"]) {
+      const { view, imap, mailboxes, generations, hidden } = fixture();
+      const read = imap.getEmails.bind(imap);
+      vi.spyOn(imap, "getEmails").mockImplementation(async (...args) => {
+        const emails = await read(...args);
+        if (change === "rebuild") generations.set(folder, 2n);
+        else if (change === "replace membership") mailboxes.get(folder)![0] = { ...hidden, uid: "900" };
+        else mailboxes.delete(folder);
+        return emails;
+      });
+      await expect(view.getEmails("INBOX")).rejects.toThrow("Mailbox temporarily unavailable");
+    }
+  });
+  it("rechecks membership before applying flags", async () => {
+    const { view, client, imap, mailboxes } = fixture();
+    const readScope = imap.getLabelUidScopes.bind(imap);
+    vi.spyOn(imap, "getLabelUidScopes").mockImplementation(async function* (...args) {
+      for await (const scope of readScope(...args)) {
+        mailboxes.set(folder, []);
+        yield scope;
+      }
+    });
+    await expect(view.starEmail("42", true, "INBOX")).rejects.toThrow("Mailbox temporarily unavailable");
+    expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+  });
+  it("keeps simultaneous facade operations' authorization snapshots isolated", async () => {
+    const { view, imap, mailboxes } = fixture();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    let release!: () => void;
+    const delayed = new Promise<void>(resolve => { release = resolve; });
+    const read = imap.getEmails.bind(imap);
+    vi.spyOn(imap, "getEmails").mockImplementationOnce(async (...args) => {
+      const emails = await read(...args);
+      started();
+      await delayed;
+      return emails;
+    });
+    const first = view.getEmails("INBOX").catch(error => error);
+    await ready;
+    try {
+      mailboxes.set(folder, mailboxes.get(folder)!.filter(message => message.internalId === "proton-sent"));
+      expect((await view.getEmailById("8", "Sent"))?.body).toContain("Approved sent body");
+    } finally { release(); }
+    expect(await first).toMatchObject({ message: expect.stringContaining("Mailbox temporarily unavailable") });
+  });
+  it("discards aggregate results if an earlier read was revoked before a later read", async () => {
+    const { view, mailboxes } = fixture();
+    expect(await view.getEmails("INBOX")).toHaveLength(1);
+    mailboxes.set(folder, mailboxes.get(folder)!.filter(message => message.internalId === "proton-sent"));
+    expect(await view.getEmails("Sent")).toHaveLength(1);
+    await expect(assertLabelAccessCurrent(view)).rejects.toThrow("Mailbox temporarily unavailable");
   });
   it("allows attachments and flag changes only for approved physical-folder UIDs", async () => {
     const { view, hidden, approved, client } = fixture();

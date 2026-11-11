@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { AnalyticsService } from "./services/analytics-service.js";
 import { currentAccessLabelFolder } from "./security/label-config.js";
-import { requireLabelToolScope, labelAllowedFolders, labelScopedImap } from "./security/label-access.js";
+import { requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent } from "./security/label-access.js";
 
 /**
  * Proton Mail MCP Server
@@ -1398,6 +1398,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         ],
       }, invokeHandler)
       : await invokeHandler();
+    await assertLabelAccessCurrent(scopedImap);
     if (currentAccessLabelFolder() !== aiLabelFolder
         || !isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
       resultIsError = true;
@@ -1496,7 +1497,9 @@ async function readFromActiveSurface<T>(
   if (!isStillActive()) {
     throw new McpError(ErrorCode.InvalidRequest, "The active account changed before this read could start. Retry after the switch completes.");
   }
-  const result = await read(labelScopedImap(access.services.imap, access.labelFolder));
+  const scopedImap = labelScopedImap(access.services.imap, access.labelFolder);
+  const result = await read(scopedImap);
+  await assertLabelAccessCurrent(scopedImap);
   if (!isStillActive()) {
     throw new McpError(ErrorCode.InvalidRequest, "The active account changed while this read was running, so its result was discarded.");
   }

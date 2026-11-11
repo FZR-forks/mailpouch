@@ -48,4 +48,4 @@ export function createLabelPolicyReader(
   return current;
 }
 
-export const currentAccessLabelFolder = createLabelPolicyReader(loadConfig, configExists, labelPolicyState(getConfigPath()));
+export const currentAccessLabelFolder = createLabelPolicyReader(loadConfig, configExists, labelPolicyState(getConfigPath));

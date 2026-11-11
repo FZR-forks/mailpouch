@@ -3,10 +3,18 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { MailboxMutationDeadlineError } from "../services/mailbox-mutation-deadline.js";
 import { logger } from "../utils/logger.js";
 import type { EmailFolder, EmailMessage, SearchEmailOptions } from "../types/index.js";
-import type { MailboxUidScope, SimpleIMAPService } from "../services/simple-imap-service.js";
+import { SEARCH_FOLDER_CAP, type MailboxUidScope, type SimpleIMAPService } from "../services/simple-imap-service.js";
 import { hashArgs, type AgentAuditLog } from "../agents/audit.js";
 import type { CallerContext } from "../agents/caller-context.js";
 import { validateLabelName } from "../utils/helpers.js";
+
+const labelAccessChecks = new WeakMap<SimpleIMAPService, () => Promise<void>>();
+
+/** Revalidate all mail used by a request before releasing combined tool, resource, or prompt results. */
+export async function assertLabelAccessCurrent(imap: SimpleIMAPService): Promise<void> {
+  const check = labelAccessChecks.get(imap);
+  if (check) await mailboxOperation(check);
+}
 
 /** Resolve a configured label name; invalid policy values fail closed. */
 export function accessLabelFolder(label: unknown): string | undefined {
@@ -86,69 +94,97 @@ async function mailboxOperation<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Same folders, UIDs and tools as the underlying service, with a live backend UID filter. */
+/** Request-scoped facade preserving folders/UIDs; revalidate combined results with assertLabelAccessCurrent. */
 export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefined): SimpleIMAPService {
   if (!folder) return imap;
   const normalize = (path: string) => path.toUpperCase() === "INBOX" ? "INBOX" : path;
   const rawFolders = async () => (await imap.syncFolders()).filter(f => f.path.toLowerCase() !== folder.toLowerCase());
-  const scopesFor = async function* (paths?: string[], entries?: EmailFolder[]): AsyncGenerator<MailboxUidScope> {
-    const available = entries ?? await rawFolders();
-    const availablePaths = new Set(available.map(entry => entry.path));
-    const requested = paths ? [...new Set(paths.map(normalize))] : [...availablePaths];
-    if (requested.some(path => !availablePaths.has(path))) {
-      throw new McpError(ErrorCode.InvalidParams, "Folder not found");
-    }
-    yield* imap.getLabelUidScopes(requested, folder);
-  };
-  const scopeFor = async (path: string) => {
-    for await (const scope of scopesFor([path])) return scope;
-    throw new McpError(ErrorCode.InvalidParams, "Folder not found");
-  };
+  const requestScopes: MailboxUidScope[] = [];
+  /** Remove Bridge label metadata before exposing message headers to an agent. */
   const cleanEmail = (email: EmailMessage): EmailMessage => ({
     ...email,
     ...(email.headers ? { headers: Object.fromEntries(Object.entries(email.headers)
       .filter(([key]) => !/^x-pm-.*label/i.test(key))) } : {}),
   });
-  const resolve = async (id: string, path?: string): Promise<{ email: EmailMessage; scope: MailboxUidScope } | null> => {
-    if (path?.toLowerCase() === folder.toLowerCase()) return null;
-    for await (const scope of scopesFor(path ? [path] : undefined)) {
-      if (!scope.uids.includes(id)) continue;
-      const email = await imap.getEmailById(id, scope.folder, true, scope);
-      if (email) return { email: cleanEmail(email), scope };
-    }
-    return null;
+  /** Track snapshots per invocation, including simultaneous calls on the same facade. */
+  const createOperation = () => {
+    const used: MailboxUidScope[] = [];
+    /** Validate visible folder paths and cap searches before scanning source headers. */
+    const scopesFor = async function* (paths?: string[], entries?: EmailFolder[], limit?: number): AsyncGenerator<MailboxUidScope> {
+      const available = entries ?? await rawFolders();
+      const availablePaths = new Set(available.map(entry => entry.path));
+      const requested = paths ? [...new Set(paths.map(normalize))] : [...availablePaths];
+      if (requested.some(path => !availablePaths.has(path))) {
+        throw new McpError(ErrorCode.InvalidParams, "Folder not found");
+      }
+      if (limit && requested.length > limit) {
+        logger.warn(`Search folder list truncated to the first ${limit} of ${requested.length} requested`, "MailboxAccess");
+      }
+      for await (const scope of imap.getLabelUidScopes(limit ? requested.slice(0, limit) : requested, folder)) {
+        used.push(scope);
+        requestScopes.push(scope);
+        yield scope;
+      }
+    };
+    /** Resolve one ordinary folder while retaining its authorization snapshot. */
+    const scopeFor = async (path: string) => {
+      for await (const scope of scopesFor([path])) return scope;
+      throw new McpError(ErrorCode.InvalidParams, "Folder not found");
+    };
+    /** Stop at the first approved physical-folder UID without scanning later folders. */
+    const resolve = async (id: string, path?: string): Promise<{ email: EmailMessage; scope: MailboxUidScope } | null> => {
+      if (path?.toLowerCase() === folder.toLowerCase()) return null;
+      for await (const scope of scopesFor(path ? [path] : undefined)) {
+        if (!scope.uids.includes(id)) continue;
+        const email = await imap.getEmailById(id, scope.folder, true, scope);
+        if (email) return { email: cleanEmail(email), scope };
+      }
+      return null;
+    };
+    /** Refresh membership before starting a flag mutation, then retain its scope for the final check. */
+    const flags = async (ids: string[], flag: string, value: boolean, path?: string) => {
+      const source = path ?? (ids.length === 1 ? (await resolve(ids[0]))?.email.folder : undefined);
+      if (!source) return { success: 0, failed: ids.length, errors: ids.map(id => `Email ${id} not found`) };
+      const scope = await scopeFor(source);
+      await imap.assertLabelScopesCurrent([scope]);
+      return imap.setScopedFlags(ids, flag, value, scope);
+    };
+    /** Preserve the single-message flag tool's success and not-found behavior. */
+    const flagOne = async (id: string, flag: string, value: boolean, path?: string) => {
+      const result = await flags([id], flag, value, path);
+      if (result.success !== 1) throw new McpError(ErrorCode.InvalidParams, "Email not found");
+      return true;
+    };
+    return { scopesFor, scopeFor, resolve, flags, flagOne, used };
   };
-  const flags = async (ids: string[], flag: string, value: boolean, path?: string) => {
-    const source = path ?? (ids.length === 1 ? (await resolve(ids[0]))?.email.folder : undefined);
-    if (!source) return { success: 0, failed: ids.length, errors: ids.map(id => `Email ${id} not found`) };
-    return imap.setScopedFlags(ids, flag, value, await scopeFor(source));
-  };
-  const flagOne = async (id: string, flag: string, value: boolean, path?: string) => {
-    const result = await flags([id], flag, value, path);
-    if (result.success !== 1) throw new McpError(ErrorCode.InvalidParams, "Email not found");
-    return true;
-  };
-  return new Proxy(imap, {
+  /** Release results only after all snapshots used by this invocation still match live label membership. */
+  const scopedOperation = <T>(operation: (scope: ReturnType<typeof createOperation>) => Promise<T>) => mailboxOperation(async () => {
+    const scope = createOperation();
+    const result = await operation(scope);
+    await imap.assertLabelScopesCurrent(scope.used);
+    return result;
+  });
+  const proxy = new Proxy(imap, {
     /** Intercept mail operations before binding other methods to the original service instance. */
     get(target, property) {
-      if (property === "getEmails") return (path = "INBOX", limit = 50, offset = 0) => mailboxOperation(async () => {
+      if (property === "getEmails") return (path = "INBOX", limit = 50, offset = 0) => scopedOperation(async ({ scopeFor }) => {
         const scope = await scopeFor(path);
         return (await target.getEmails(scope.folder, limit, offset, scope)).map(cleanEmail);
       });
-      if (property === "searchEmails") return (options: SearchEmailOptions) => mailboxOperation(async () => {
+      if (property === "searchEmails") return (options: SearchEmailOptions) => scopedOperation(async ({ scopesFor }) => {
         const requested = options.folders ?? [options.folder ?? "INBOX"];
         const paths = (requested[0] === "*" || requested[0]?.toLowerCase() === "all") ? undefined : requested;
         const scopes = new Map<string, MailboxUidScope>();
-        for await (const scope of scopesFor(paths)) scopes.set(scope.folder, scope);
+        for await (const scope of scopesFor(paths, undefined, SEARCH_FOLDER_CAP)) scopes.set(scope.folder, scope);
         if (!scopes.size) return [];
         return (await target.searchEmails({ ...options, folder: undefined, folders: [...scopes.keys()] }, true, scopes)).map(cleanEmail);
       });
-      if (property === "getEmailById") return (id: string, path?: string) => mailboxOperation(async () => (await resolve(id, path))?.email ?? null);
-      if (property === "downloadAttachment") return (id: string, index: number, path?: string) => mailboxOperation(async () => {
+      if (property === "getEmailById") return (id: string, path?: string) => scopedOperation(async ({ resolve }) => (await resolve(id, path))?.email ?? null);
+      if (property === "downloadAttachment") return (id: string, index: number, path?: string) => scopedOperation(async ({ resolve }) => {
         const source = await resolve(id, path);
         return source ? target.downloadAttachment(id, index, source.scope.folder, true, source.scope) : null;
       });
-      if (property === "getFolders" || property === "syncFolders") return () => mailboxOperation(async () => {
+      if (property === "getFolders" || property === "syncFolders") return () => scopedOperation(async ({ scopesFor }) => {
         const result = [];
         const entries = await rawFolders();
         const entriesByPath = new Map(entries.map(entry => [entry.path, entry]));
@@ -158,11 +194,11 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
         return result;
       });
       if (property === "markEmailRead" || property === "starEmail") return (id: string, value = true, path?: string) =>
-        mailboxOperation(() => flagOne(id, property === "markEmailRead" ? "\\Seen" : "\\Flagged", value, path));
+        scopedOperation(({ flagOne }) => flagOne(id, property === "markEmailRead" ? "\\Seen" : "\\Flagged", value, path));
       if (property === "setFlag") return (id: string, flag: string, value = true, path?: string) =>
-        mailboxOperation(() => flagOne(id, flag, value, path));
+        scopedOperation(({ flagOne }) => flagOne(id, flag, value, path));
       if (property === "bulkMarkRead" || property === "bulkStar") return (ids: string[], value = true, path?: string) =>
-        mailboxOperation(async () => {
+        scopedOperation(async ({ flags }) => {
           if (path) return flags(ids, property === "bulkMarkRead" ? "\\Seen" : "\\Flagged", value, path);
           const result = { success: 0, failed: 0, errors: [] as string[] };
           for (const id of ids) {
@@ -175,4 +211,6 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+  labelAccessChecks.set(proxy, () => imap.assertLabelScopesCurrent(requestScopes));
+  return proxy;
 }

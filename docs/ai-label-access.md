@@ -36,7 +36,14 @@ instructions, cursors, and successful send results. Messages keep their normal
 folder names and UIDs. Unlabeled messages resolve as absent. The account owner
 can add/remove messages from the visible set in Proton without restarting
 MailPouch; changes take effect after Bridge synchronizes. A policy change during
-a request discards its result. Policy setup failures surface as an ordinary
+a request discards its result. The backend rechecks access-label membership and
+its mailbox generation after each scoped operation, before releasing results;
+if membership changed, retry the operation. Folder enumeration and the initial
+label snapshot are shared within an operation, with one final label scan rather
+than a separate rescan for every folder. Searches compute scopes only for their
+existing maximum of 20 folders. Combined tool, resource, and prompt responses
+also revalidate every read they used before release, including analytics that
+reads Inbox and Sent separately. Policy setup failures surface as an ordinary
 mailbox-unavailable error, with details retained in owner logs.
 
 The cross-folder membership check uses Bridge's generated `X-Pm-Internal-Id`,
@@ -109,7 +116,7 @@ Check sticky labels and conversation grouping in the Proton account, then verify
 inheritance with a test conversation. MailPouch does not change those account
 settings or label unrelated incoming mail.
 
-Automated tests cover scope bypasses, cached reads after revocation, filtered
+Automated tests cover scope bypasses, revocation during reads and between calls, filtered
 metadata, durable labeling retries, missing labels, alternate senders, and
 settings validation. Real Proton Bridge testing is still required before
 relying on this feature. Use an isolated test account to verify:

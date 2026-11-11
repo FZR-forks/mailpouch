@@ -657,10 +657,12 @@ export class SMTPService {
         }
       }
       if (transporter !== this.transporter) throw new Error("SMTP transport changed before delivery; retry the call.");
-      dispatchedTransportGeneration = this.transportGeneration;
       const info = await runAccountMailMutation(
         this,
-        () => transporter.sendMail(mailOptions),
+        () => {
+          dispatchedTransportGeneration = this.transportGeneration;
+          return transporter.sendMail(mailOptions);
+        },
       );
       if (dispatchedTransportGeneration !== this.transportGeneration) {
         throw new MailboxMutationDeadlineError(
@@ -680,6 +682,16 @@ export class SMTPService {
         messageId: info.messageId,
       };
     } catch (error: unknown) {
+      // No delivery can exist before dispatch. After dispatch only a definitive
+      // rejection from the same live transport permits dropping the queued ID.
+      const responseCode = error && typeof error === "object" ? (error as { responseCode?: unknown }).responseCode : undefined;
+      const neverDispatched = dispatchedTransportGeneration === undefined;
+      const definitivelyRejected = dispatchedTransportGeneration === this.transportGeneration
+        && typeof responseCode === "number" && responseCode >= 400 && responseCode <= 599;
+      if (queuedMessageId && (neverDispatched || definitivelyRejected)) {
+        try { this.outgoingLabels!.discard(queuedMessageId); }
+        catch (cleanupError) { logger.warn("Could not discard unsent message's labeling job", "SMTPService", cleanupError); }
+      }
       // The request coordinator owns cancellation/outcome reporting. Do not
       // downgrade its typed error into an ordinary SMTP delivery failure.
       if (error instanceof MailboxMutationDeadlineError) throw error;
@@ -695,12 +707,6 @@ export class SMTPService {
           true,
           error,
         );
-      }
-      const responseCode = error && typeof error === "object" ? (error as { responseCode?: unknown }).responseCode : undefined;
-      if (queuedMessageId && dispatchedTransportGeneration === this.transportGeneration
-          && typeof responseCode === "number" && responseCode >= 400 && responseCode <= 599) {
-        try { this.outgoingLabels!.discard(queuedMessageId); }
-        catch (cleanupError) { logger.warn("Could not discard rejected send's labeling job", "SMTPService", cleanupError); }
       }
       if (isTransientAbuseError(error)) {
         this.backoff.record("abuse");

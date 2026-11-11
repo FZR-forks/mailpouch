@@ -775,6 +775,39 @@ it("scheduled delivery uses the same labeling preflight and alternate sender", a
 });
 
 describe("label queue delivery outcome handling", () => {
+  it("discards a prepared job when transport replacement prevents SMTP dispatch", async () => {
+    const discard = vi.fn();
+    const prepare = vi.fn(async (_id: string) => {
+      svc.reinitialize();
+      return true;
+    });
+    const svc = new SMTPService(makeConfig(), { prepare, discard, stop: vi.fn() });
+    const result = await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });
+    expect(result).toMatchObject({ success: false, error: "SMTP transport changed before delivery; retry the call." });
+    expect(sendMailMock).not.toHaveBeenCalled();
+    expect(discard).toHaveBeenCalledExactlyOnceWith(prepare.mock.calls[0][0]);
+    await svc.close();
+  });
+  it("discards a prepared job when cancellation prevents SMTP dispatch", async () => {
+    const controller = new AbortController();
+    let finished!: () => void;
+    const cleaned = new Promise<void>(resolve => { finished = resolve; });
+    const discard = vi.fn(finished);
+    const prepare = vi.fn(async (_id: string) => {
+      controller.abort();
+      return true;
+    });
+    const svc = new SMTPService(makeConfig(), { prepare, discard, stop: vi.fn() });
+    const sending = withMailboxMutationDeadline({
+      tool: "send_email", signal: controller.signal, deadlineAt: Date.now() + 10_000,
+      transports: [{ scope: svc, abort: () => svc.abortActiveMutationTransport("cancelled") }],
+    }, () => svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" }));
+    await expect(sending).rejects.toBeInstanceOf(MailboxMutationDeadlineError);
+    await cleaned;
+    expect(sendMailMock).not.toHaveBeenCalled();
+    expect(discard).toHaveBeenCalledExactlyOnceWith(prepare.mock.calls[0][0]);
+    await svc.close();
+  });
   it("preserves normal Message-ID generation when labeling is disabled", async () => {
     const svc = new SMTPService(makeConfig(), { prepare: vi.fn().mockResolvedValue(false), stop: vi.fn(), discard: vi.fn() });
     await svc.sendEmail({ to: "a@b.com", subject: "Hi", body: "Body" });

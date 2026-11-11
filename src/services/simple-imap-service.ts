@@ -70,6 +70,8 @@ interface ImapBodyNode {
 
 /** Maximum number of emails held in the in-process cache (count-based guard). */
 const MAX_EMAIL_CACHE_SIZE = 500;
+/** Maximum number of mailboxes searched by a single multi-folder query. */
+export const SEARCH_FOLDER_CAP = 20;
 /**
  * Maximum total byte estimate for the email cache (byte-size guard).
  * Large HTML marketing emails can exceed 500 KB each; 500 × 500 KB = 250 MB is
@@ -106,7 +108,14 @@ export interface MailboxUidScope {
   unread: number;
 }
 
+interface LabelMembershipSnapshot {
+  folder: string;
+  uidValidity: bigint;
+  identities: ReadonlySet<string>;
+}
+
 export class SimpleIMAPService {
+  private readonly labelScopeSnapshots = new WeakMap<MailboxUidScope, LabelMembershipSnapshot>();
   private client: ImapFlow | null = null;
   private isConnected: boolean = false;
   private emailCache: Map<string, { email: EmailMessage; cachedAt: number }> = new Map();
@@ -1196,48 +1205,81 @@ export class SimpleIMAPService {
     throw new Error("Mailbox scope is unavailable");
   }
 
-  /** Share a fresh label snapshot and folder listing only within this iteration, scanning source folders lazily. */
+  /** Read Bridge identities while holding the selected mailbox lock; never fetch message bodies. */
+  private async readMailboxIdentities(path: string) {
+    const lock = await this.client!.getMailboxLock(path);
+    try {
+      const mailbox = this.client!.mailbox;
+      if (!mailbox || typeof mailbox === "boolean" || mailbox.uidValidity === undefined) {
+        throw new Error("Mailbox identity is unavailable");
+      }
+      const entries: Array<{ uid: string; identity: string; unread: boolean }> = [];
+      if (mailbox.exists) {
+        for await (const message of this.client!.fetch("1:*", {
+          uid: true, flags: true, headers: ["x-pm-internal-id"],
+        })) {
+          // Do not authorize by caller-controlled RFC Message-ID: distinct
+          // messages can share it. Bridge overwrites this internal header.
+          const parsed = await simpleParser(message.headers ?? Buffer.alloc(0));
+          const identity = parsed.headers?.get("x-pm-internal-id");
+          if (typeof identity === "string" && identity.trim()) entries.push({
+            uid: String(message.uid), identity: identity.trim(), unread: !message.flags?.has("\\Seen"),
+          });
+        }
+      }
+      return { entries, uidValidity: mailbox.uidValidity };
+    } finally { lock.release(); }
+  }
+
+  /** Share a fresh label snapshot within this iteration; callers must revalidate it before returning results. */
   async *getLabelUidScopes(folders: string[], labelFolder: string): AsyncGenerator<MailboxUidScope> {
     folders.forEach(folder => this.validateFolderName(folder));
     this.validateFolderName(labelFolder);
     if (!folders.length) return;
     await this.requireReadConnection("read mailbox");
-    const identities = async (path: string) => {
-      const lock = await this.client!.getMailboxLock(path);
-      try {
-        const mailbox = this.client!.mailbox;
-        if (!mailbox || typeof mailbox === "boolean" || mailbox.uidValidity === undefined) {
-          throw new Error("Mailbox identity is unavailable");
-        }
-        const entries: Array<{ uid: string; identity: string; unread: boolean }> = [];
-        if (mailbox.exists) {
-          for await (const message of this.client!.fetch("1:*", {
-            uid: true, flags: true, headers: ["x-pm-internal-id"],
-          })) {
-            // Do not authorize by caller-controlled RFC Message-ID: distinct
-            // messages can share it. Bridge overwrites this internal header.
-            const parsed = await simpleParser(message.headers ?? Buffer.alloc(0));
-            const identity = parsed.headers?.get("x-pm-internal-id");
-            if (typeof identity === "string" && identity.trim()) entries.push({
-              uid: String(message.uid), identity: identity.trim(), unread: !message.flags?.has("\\Seen"),
-            });
-          }
-        }
-        return { entries, uidValidity: mailbox.uidValidity };
-      } finally { lock.release(); }
+    const label = await this.readMailboxIdentities(labelFolder);
+    const allowed = new Set(label.entries.map(entry => entry.identity));
+    const snapshot: LabelMembershipSnapshot = { folder: labelFolder, uidValidity: label.uidValidity, identities: allowed };
+    const bind = (scope: MailboxUidScope) => {
+      this.labelScopeSnapshots.set(scope, snapshot);
+      return scope;
     };
-    const allowed = new Set((await identities(labelFolder)).entries.map(entry => entry.identity));
     const folderInfo = new Map((await this.client!.list()).map(entry => [entry.path, entry]));
     for (const folder of folders) {
       // Preserve non-selectable hierarchy entries in folder listings with zero
       // visible messages; they are not message-bearing mailboxes.
       if (folderInfo.get(folder)?.flags.has("\\Noselect")) {
-        yield { folder, uidValidity: 0n, uids: [], unread: 0 };
+        yield bind({ folder, uidValidity: 0n, uids: [], unread: 0 });
         continue;
       }
-      const source = await identities(folder);
+      const source = await this.readMailboxIdentities(folder);
       const visible = source.entries.filter(entry => allowed.has(entry.identity));
-      yield { folder, uidValidity: source.uidValidity, uids: visible.map(entry => entry.uid), unread: visible.filter(entry => entry.unread).length };
+      yield bind({ folder, uidValidity: source.uidValidity, uids: visible.map(entry => entry.uid), unread: visible.filter(entry => entry.unread).length });
+    }
+  }
+
+  /** Discard scoped results if label membership or its mailbox generation changed during the operation. */
+  async assertLabelScopesCurrent(scopes: Iterable<MailboxUidScope>): Promise<void> {
+    const snapshots = new Set<LabelMembershipSnapshot>();
+    for (const scope of scopes) {
+      const snapshot = this.labelScopeSnapshots.get(scope);
+      if (!snapshot) throw new Error("Mailbox scope is unavailable");
+      snapshots.add(snapshot);
+    }
+    if (!snapshots.size) return;
+    await this.requireReadConnection("read mailbox");
+    const checked = new Map<string, { uidValidity: bigint; identities: ReadonlySet<string> }>();
+    for (const snapshot of snapshots) {
+      let current = checked.get(snapshot.folder);
+      if (!current) {
+        const label = await this.readMailboxIdentities(snapshot.folder);
+        current = { uidValidity: label.uidValidity, identities: new Set(label.entries.map(entry => entry.identity)) };
+        checked.set(snapshot.folder, current);
+      }
+      if (current.uidValidity !== snapshot.uidValidity || current.identities.size !== snapshot.identities.size
+          || [...snapshot.identities].some(identity => !current.identities.has(identity))) {
+        throw new Error("Mailbox changed during the request; retry the operation");
+      }
     }
   }
 
@@ -1492,7 +1534,7 @@ export class SimpleIMAPService {
     }
 
     const limit = Math.min(Math.max(1, options.limit || 100), 200);
-    const FOLDER_CAP = 20;
+    const FOLDER_CAP = SEARCH_FOLDER_CAP;
     // hasAttachment is a LOCAL post-filter (IMAP SEARCH can't express it). To
     // avoid grossly under-returning below `limit`, over-fetch the per-folder
     // candidate window when it's set, then filter, then slice to `limit`.

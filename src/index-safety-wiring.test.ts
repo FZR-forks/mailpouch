@@ -98,5 +98,17 @@ describe("production safety wiring", () => {
       expect(secondCheck).toBeLessThan(body.indexOf(derived));
     }
   });
+  it("revalidates all mail used by tool and resource/prompt handlers after their combined result is built", () => {
+    const tool = source.slice(source.indexOf("const scopedImap = labelScopedImap(routedImapService"));
+    const toolCheck = tool.indexOf("await assertLabelAccessCurrent(scopedImap)");
+    expect(toolCheck).toBeGreaterThan(tool.indexOf("const result = ACCOUNT_MAIL_MUTATION_TOOLS.has(name)"));
+    expect(toolCheck).toBeLessThan(tool.indexOf("if (currentAccessLabelFolder() !== aiLabelFolder"));
+    const surfaceStart = source.indexOf("async function readFromActiveSurface<T>(");
+    const surface = source.slice(surfaceStart, source.indexOf("function requireReadSurfaceAccess(", surfaceStart));
+    const surfaceCheck = surface.indexOf("await assertLabelAccessCurrent(scopedImap)");
+    expect(surfaceCheck).toBeGreaterThan(surface.indexOf("const result = await read(scopedImap)"));
+    expect(surfaceCheck).toBeLessThan(surface.lastIndexOf("if (!isStillActive())"));
+    expect(surfaceCheck).toBeLessThan(surface.indexOf("return result;"));
+  });
 
 });

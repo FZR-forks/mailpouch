@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { labelPolicyState } from "./label-policy-state.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createLabelPolicyReader } from "./label-config.js";
 
 describe("live label policy", () => {
@@ -27,6 +27,39 @@ describe("live label policy", () => {
 
 
 describe("durable fail-closed label policy", () => {
+  it("resolves the marker path on each read and write after the active profile changes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailpouch-label-policy-"));
+    try {
+      const first = join(dir, "first.json");
+      const second = join(dir, "second.json");
+      let path = first;
+      const resolve = vi.fn(() => path);
+      const state = labelPolicyState(resolve);
+      expect(resolve).not.toHaveBeenCalled();
+      const read = createLabelPolicyReader(() => ({}), () => true, state);
+      expect(read()).toBeUndefined();
+      labelPolicyState(second).record(true);
+      path = second;
+      expect(read).toThrow("blocked");
+      state.record(false);
+      expect(labelPolicyState(second).enabled()).toBe(false);
+      path = first;
+      state.record(true);
+      expect(labelPolicyState(first).enabled()).toBe(true);
+      expect(labelPolicyState(second).enabled()).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("keeps imports available with an invalid config override while blocking mail access", async () => {
+    vi.stubEnv("MAILPOUCH_CONFIG", join(homedir(), "..", "outside-home-mailpouch.json"));
+    vi.resetModules();
+    try {
+      const module = await import("./label-config.js");
+      expect(module.currentAccessLabelFolder).toThrow("must point to a path within the home directory");
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
   it("captures activation at startup before any request", () => {
     let config: { aiAccessLabel?: unknown } | null = { aiAccessLabel: "AI" };
     const read = createLabelPolicyReader(() => config, () => false);
