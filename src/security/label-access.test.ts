@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { accessLabelFolder, scopeLabelTool, requireLabelToolScope, labelAllowedFolders, labelScopedImap, assertLabelAccessCurrent, labelToolVisible, LABEL_HIDDEN_TOOLS } from "./label-access.js";
 import { allToolDefs } from "../tools/registry.js";
-import { SimpleIMAPService } from "../services/simple-imap-service.js";
+import { SimpleIMAPService, parseIdentityHeaders } from "../services/simple-imap-service.js";
 import { handlers as reading } from "../tools/reading.js";
 import { handlers as sending } from "../tools/sending.js";
 import { executeMailTool } from "../services/mail-tool-execution.js";
@@ -280,10 +280,11 @@ describe("transparent backend mail filter", () => {
     });
     await expect(f.view.searchEmails({ folders: ["INBOX", "Sent"] })).rejects.toThrow();
   });
-  it("incremental identity reads never skip UIDs below one cached by a targeted read", async () => {
-    const { imap } = fixture();
-    await imap.readMailboxEntries("INBOX", ["43"]);
-    expect((await imap.readNewMailboxEntries("INBOX")).map(entry => entry.uid).sort()).toEqual(["42", "43"]);
+  it("parses Bridge identities and fails closed on duplicated identity headers", () => {
+    expect(parseIdentityHeaders(Buffer.from("X-Pm-Internal-Id: abc==\r\nMessage-ID:\r\n <Self@X>\r\n\r\n")))
+      .toEqual({ internalId: "abc==", messageId: "<self@x>" });
+    expect(parseIdentityHeaders(Buffer.from("X-Pm-Internal-Id: real\r\nX-Pm-Internal-Id: spoof\r\n\r\n")).internalId).toBeUndefined();
+    expect(parseIdentityHeaders(undefined)).toEqual({ internalId: undefined, messageId: undefined });
   });
   it("refreshes label membership between multi-folder operations", async () => {
     const { view, client, mailboxes } = fixture();

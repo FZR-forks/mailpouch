@@ -1,5 +1,4 @@
-import { OutgoingLabelQueue, type OutgoingLabeler } from "../services/outgoing-labels.js";
-import { ReplyLabeler } from "../services/reply-labels.js";
+import { OutgoingLabelQueue } from "../services/outgoing-labels.js";
 import { currentAccessLabelFolder } from "../security/label-config.js";
 import { getConfigPath } from "../config/loader.js";
 /**
@@ -642,20 +641,10 @@ export class AccountManager extends EventEmitter {
         if (this.retiredServices.has(services)) throw new Error("Account was retired.");
       },
     );
-    // Replies to approved mail are labeled in the background; it never
-    // connects on its own and does nothing while the policy is off.
-    const replies = new ReplyLabeler(`${getConfigPath()}.reply-labels-${fingerprint}.json`, imap, () => currentAccessLabelFolder());
-    replies.start();
-    // SMTP close/credential wipe retires both workers with the account.
-    const labeler: OutgoingLabeler = {
-      prepare: (messageId, folder, mailbox) => queue.prepare(messageId, folder, mailbox),
-      discard: messageId => queue.discard(messageId),
-      stop: () => { queue.stop(); replies.stop(); },
-    };
     const services: AccountServices = {
       spec: runtimeSpec,
       imap,
-      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec), labeler),
+      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec), queue),
       labels: queue,
     };
     return services;

@@ -131,8 +131,6 @@ export interface MessageIdentityHeaders {
   internalId?: string;
   /** Lowercased RFC Message-ID, when present exactly once. */
   messageId?: string;
-  /** Lowercased In-Reply-To and References Message-IDs, nearest first (bounded). */
-  parents: string[];
 }
 
 /** Immutable per-UID message identity. IMAP never reuses a UID within one UIDVALIDITY. */
@@ -145,11 +143,9 @@ export interface MailboxIdentityEntry extends MailboxMessageIdentity {
   unread: boolean;
 }
 
-/** `scannedThrough`: every UID at or below it is cached (or was absent); targeted reads never advance it. */
-interface IdentityCache { uidValidity: bigint; byUid: Map<string, MailboxMessageIdentity>; scannedThrough: number }
+interface IdentityCache { uidValidity: bigint; byUid: Map<string, MailboxMessageIdentity> }
 
-const IDENTITY_HEADERS = ["x-pm-internal-id", "message-id", "in-reply-to", "references"];
-const MAX_THREAD_PARENTS = 20;
+const IDENTITY_HEADERS = ["x-pm-internal-id", "message-id"];
 
 /** Parse only the few identity headers we request; duplicate identity headers fail closed. */
 export function parseIdentityHeaders(raw: Buffer | undefined): MessageIdentityHeaders {
@@ -166,11 +162,7 @@ export function parseIdentityHeaders(raw: Buffer | undefined): MessageIdentityHe
     const found = values.get(key);
     return found?.length === 1 && found[0] ? found[0] : undefined;
   };
-  const ids = (value: string | undefined) => (value?.match(/<[^<>\s]+>/g) ?? []).map(id => id.toLowerCase());
-  const messageId = ids(single("message-id"))[0];
-  const parents = [...new Set([...ids(single("in-reply-to")), ...ids(single("references")).reverse()])]
-    .filter(id => id !== messageId).slice(0, MAX_THREAD_PARENTS);
-  return { internalId: single("x-pm-internal-id"), messageId, parents };
+  return { internalId: single("x-pm-internal-id"), messageId: single("message-id")?.match(/<[^<>\s]+>/)?.[0].toLowerCase() };
 }
 
 export class SimpleIMAPService {
@@ -1280,25 +1272,21 @@ export class SimpleIMAPService {
       }
       let cache = this.identityCache.get(path);
       if (!cache || cache.uidValidity !== mailbox.uidValidity) {
-        cache = { uidValidity: mailbox.uidValidity, byUid: new Map(), scannedThrough: 0 };
+        cache = { uidValidity: mailbox.uidValidity, byUid: new Map() };
         this.identityCache.set(path, cache);
       }
       return await read(cache, mailbox.uidValidity, !!mailbox.exists);
     } finally { lock.release(); }
   }
 
-  /** Fetch identity headers (never bodies) for `range`, keeping UIDs at or above `minUid`; returns the highest kept UID. */
-  private async cacheIdentities(cache: IdentityCache, range: string, minUid = 0): Promise<number> {
-    let highest = 0;
+  /** Fetch identity headers (never bodies) for `range`. */
+  private async cacheIdentities(cache: IdentityCache, range: string): Promise<void> {
     for await (const message of this.client!.fetch(range, { uid: true, headers: IDENTITY_HEADERS }, { uid: true })) {
       // Never authorize by the sender-controlled RFC Message-ID: distinct
       // messages can share it. Bridge sets X-Pm-Internal-Id itself.
       const uid = String(message.uid);
-      if (message.uid < minUid) continue;
       cache.byUid.set(uid, { uid, ...parseIdentityHeaders(message.headers) });
-      highest = Math.max(highest, message.uid);
     }
-    return highest;
   }
 
   /**
@@ -1320,11 +1308,10 @@ export class SimpleIMAPService {
       for (const chunk of chunkUidsForWire(live.filter(entry => !cache.byUid.has(entry.uid)).map(entry => entry.uid))) {
         await this.cacheIdentities(cache, chunk);
       }
-      // A full listing also forgets expunged UIDs and proves every UID up to its highest was seen.
+      // A full listing also forgets expunged UIDs.
       if (!uids) {
         const present = new Set(live.map(entry => entry.uid));
         for (const uid of cache.byUid.keys()) if (!present.has(uid)) cache.byUid.delete(uid);
-        for (const uid of present) cache.scannedThrough = Math.max(cache.scannedThrough, Number(uid));
       }
       return {
         uidValidity,
@@ -1333,22 +1320,6 @@ export class SimpleIMAPService {
           return identity ? [{ ...identity, unread: entry.unread }] : [];
         }),
       };
-    });
-  }
-
-  /**
-   * Cached identities plus any UIDs that arrived since the last read. It never
-   * relists every UID, so expunges go unobserved: use it only for background
-   * matching, never for authorization.
-   */
-  async readNewMailboxEntries(path: string): Promise<MailboxMessageIdentity[]> {
-    return this.withIdentityCache(path, async (cache, _uidValidity, exists) => {
-      // Resume from the last complete scan, not the highest cached UID: a
-      // targeted read may have cached one UID above unscanned ones.
-      const next = cache.scannedThrough + 1;
-      // "N:*" also returns the highest message when it is below N; minUid drops it.
-      if (exists) cache.scannedThrough = Math.max(cache.scannedThrough, await this.cacheIdentities(cache, `${next}:*`, next));
-      return [...cache.byUid.values()];
     });
   }
 
@@ -1390,14 +1361,6 @@ export class SimpleIMAPService {
     const proof = this.labelScopeProofs.get(scope);
     if (!proof) throw new Error("Mailbox scope is unavailable");
     return proof.identities;
-  }
-
-  /** Selectable mailboxes (hierarchy-only entries omitted) with their special-use attribute. */
-  async selectableMailboxes(): Promise<Array<{ path: string; specialUse?: string }>> {
-    await this.requireReadConnection("list mailboxes");
-    return (await this.client!.list())
-      .filter(entry => !entry.flags.has("\\Noselect") && !entry.flags.has("\\NonExistent"))
-      .map(entry => ({ path: entry.path, ...(entry.specialUse ? { specialUse: entry.specialUse } : {}) }));
   }
 
   /**

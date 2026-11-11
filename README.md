@@ -744,6 +744,6 @@ MIT — see [LICENSE](LICENSE)
 ### Restrict agents to an AI label
 
 Settings → Permissions → **AI email access label** enables server-wide label-only
-mail access with automatic labeling of sent mail, drafts, and replies. See [setup, behavior, and current
+mail access with automatic labeling of sent mail and drafts (replies via Proton's sticky labels). See [setup, behavior, and current
 limits](docs/ai-label-access.md). Configure the label before connecting agents;
 the restriction is opt-in.

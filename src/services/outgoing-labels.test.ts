@@ -20,9 +20,9 @@ function setup(label: unknown = "AI-Accessible") {
     syncFolders: vi.fn(async () => [{ path: folder }, { path: "Envoyés", specialUse: "\\Sent" }, { path: "Brouillons", specialUse: "\\Drafts" }]),
     searchEmails: vi.fn(async (o: { folder: string }) => mailboxes.get(o.folder) ?? []),
     // Identity-proven COPY: the predicate sees the source message's real headers.
-    copyVerifiedToFolder: vi.fn(async (uid: string, target: string, source: string, matches: (h: { messageId?: string; parents: string[] }) => boolean) => {
+    copyVerifiedToFolder: vi.fn(async (uid: string, target: string, source: string, matches: (h: { messageId?: string }) => boolean) => {
       const message = mailboxes.get(source)?.find(m => m.id === uid);
-      if (!message || !matches({ messageId: message.messageId.toLowerCase(), parents: [] })) throw new Error("Mailbox changed during the request");
+      if (!message || !matches({ messageId: message.messageId.toLowerCase() })) throw new Error("Mailbox changed during the request");
       return imap.copyEmailToFolder(uid, target, source);
     }),
     copyEmailToFolder: vi.fn(async (...args: string[]) => {
@@ -197,7 +197,7 @@ describe("outgoing label activation and rejected sends", () => {
     mailboxes.set("Envoyés", [{ id: "8", messageId: id }]);
     // The mailbox is rebuilt between the search and the COPY: UID 8 is now other mail.
     imap.copyVerifiedToFolder.mockImplementationOnce(async (uid, target, source, matches) => {
-      expect(matches({ messageId: "<private@example.com>", parents: [] })).toBe(false);
+      expect(matches({ messageId: "<private@example.com>" })).toBe(false);
       throw new Error("Mailbox changed during the request");
     });
     await expect(queue.processPending()).rejects.toThrow("Mailbox changed");

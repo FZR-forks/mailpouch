@@ -90,7 +90,7 @@ Mail an agent sends under the policy (direct sends, replies, forwards, test
 sends, and its scheduled sends) and drafts it saves are labeled automatically.
 Mail the owner sends, including schedules the owner created and sends from the
 settings UI, is not labeled at send time, even if it is delivered while the policy
-is on. The owner's replies to approved mail are replies like any other (see below).
+is on.
 If the policy changes between a request and delivery, the copy is not labeled. `send_email`, `reply_to_email`,
 `forward_email`, and `schedule_email` accept an optional `from` address so an
 agent can pick among the account's addresses; Proton SMTP validates it.
@@ -100,7 +100,7 @@ Before delivery, MailPouch checks that the label exists and durably queues a
 server-generated Message-ID using the sender's domain. If either step fails, SMTP
 is not called. After SMTP, the label worker finds that exact Message-ID in Sent
 and applies the label via IMAP COPY, then verifies it. Every background COPY
-(sent mail, drafts, replies) first proves the message's identity
+(sent mail, drafts) first proves the message's identity
 under the source mailbox lock and is refused if the mailbox was rebuilt since. It retries a few seconds
 after the send, then every 10 seconds, across Bridge outages, delayed Sent
 synchronization, and restarts; retries never resend mail. Drafts are labeled the
@@ -124,47 +124,32 @@ cancels only those, never the owner's other schedules.
 
 ## Incoming replies
 
-Replies to approved mail are approved automatically, so the agent sees answers
-to what it sent and to what the owner labeled, regardless of Proton's sticky
-labels setting (which also works if enabled). About every 30 seconds, while IMAP
-is connected, MailPouch labels a message whose `In-Reply-To`/`References` names
-the Message-ID of an approved message, including replies to replies and the
-owner's own replies in that thread (as Proton's sticky labels would). Rules:
+Replies are made visible by Proton's **sticky labels**: once a conversation has
+the access label, Proton applies it to later incoming messages in that
+conversation, such as replies to the agent's mail. Turn it on once per account
+in Proton Mail: Settings → All settings → Messages and composing → **Sticky
+labels**. It applies only to conversations started after it is enabled, and in
+testing it did not label a reply the account sent to itself. Without it, replies
+stay hidden until labeled.
 
-- A Message-ID only counts when *every* message carrying it is approved. A sender
-  reusing another thread's Message-ID, or a copy in Spam/Trash, blocks it.
-- Spam and Trash are never labeled; a reply restored from them is labeled on the
-  next scan.
-- If any mailbox cannot be read, the scan labels nothing. Right before each COPY
-  the worker re-reads the label and the policy, so an anchor whose label was
-  removed mid-scan approves nothing further. Each attempt is saved before its
-  COPY, so a later removal always sticks; a reply whose labeling fails is not
-  retried (its outcome may be unknown), so label it manually if needed.
-- A message once seen with the label is never labeled again. If the owner removes
-  the label from a reply, it stays hidden (state: `.reply-labels-<fingerprint>.json`).
-  Removing the label from one message does not stop later replies that reference
-  other approved messages in the same thread; unlabel the thread to stop it.
-- Anyone who knows an approved message's Message-ID (for example a recipient of
-  the agent's mail) can reach the agent by replying. That is what "replies are
-  visible" means; treat inbound content as untrusted.
-
-MailPouch does not label unrelated incoming mail. Proton filters can apply the
-label to incoming mail that matches rules, if the owner wants that.
+Proton groups conversations by its own threading, so anyone who replies in a
+labeled conversation can reach the agent; treat inbound content as untrusted.
+Removing the label from a conversation stops new messages there from becoming
+visible. Proton filters can also apply the label to mail matching rules.
 
 ## Verification
 
 Automated tests cover scope bypasses, UID reuse, revocation during reads and
 between calls, scoped moves and label changes, filtered metadata, durable
-labeling retries, drafts, reply labeling, missing labels, alternate senders, tool
+labeling retries, drafts, missing labels, alternate senders, tool
 visibility, and settings validation.
 
 Verified against Proton Bridge 3.27.1 (2026-11-11, isolated test account): every
 message carries `X-Pm-Internal-Id`, identical across Inbox, All Mail, and the
 label; COPY into `Labels/<name>` applies the label without duplicating the
 message; archive, trash, and restore keep the label; and, through the MCP server,
-every item below, including a reply from an outside mailbox (Proton delivers the
-generated Message-ID unchanged) and a server restart during a Bridge outage
-(labeled once, never resent). Bridge lists All Mail without the `\All` flag.
+every item below, including an outside reply labeled by sticky labels and a
+server restart during a Bridge outage (labeled once, never resent). Bridge lists All Mail without the `\All` flag.
 
 To re-verify, for example after a Bridge upgrade, use an isolated test account:
 
@@ -176,8 +161,8 @@ To re-verify, for example after a Bridge upgrade, use an isolated test account:
    draft each appear under the access label, without duplicate deliveries.
 4. A Bridge interruption or daemon restart after SMTP acceptance resumes
    labeling without resending; removing the label after completion stays revoked.
-5. With sticky labels off, a reply to agent mail becomes visible; an unrelated
-   message stays hidden; removing the label from that reply keeps it hidden.
+5. With sticky labels on, a reply to agent mail becomes visible; an unrelated
+   message stays hidden.
 6. Archiving and trashing approved mail keeps it visible in Archive/Trash.
 
 Bridge retains broad access to decrypted mail; this setting restricts what the
