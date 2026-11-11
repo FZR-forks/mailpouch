@@ -106,19 +106,20 @@ describe("background reply labeling", () => {
     expect(await f.labeler.scan()).toBe(1);
   });
 
-  it("records an approval before the COPY, and forgets it only when the COPY did not land", async () => {
+  it("records each attempt before its COPY and never retries one whose outcome is unknown", async () => {
     const f = setup();
     approve(f, { uid: "1", internalId: "original", messageId: "<a@x>" });
     f.source.push({ uid: "2", internalId: "reply", messageId: "<b@y>", parents: ["<a@x>"] });
     let recordedBeforeCopy = false;
     f.imap.copyVerifiedToFolder.mockImplementationOnce(async () => {
       recordedBeforeCopy = JSON.parse(readFileSync(path, "utf8")).labels[label].includes("reply");
-      throw new Error("Bridge offline");
+      throw new Error("connection lost; COPY outcome unknown");
     });
     expect(await f.labeler.scan()).toBe(0);
     expect(recordedBeforeCopy).toBe(true);
-    expect(JSON.parse(readFileSync(path, "utf8")).labels[label]).toEqual(["original"]);
-    expect(await f.labeler.scan()).toBe(1);
+    // The COPY may have landed and been removed by the owner since: never re-label.
+    expect(await f.labeler.scan()).toBe(0);
+    expect(f.imap.copyVerifiedToFolder).toHaveBeenCalledTimes(1);
   });
 
   it("recognizes Bridge's All Mail by name when it lacks the \\All flag", async () => {

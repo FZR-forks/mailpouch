@@ -70,13 +70,13 @@ export class ReplyLabeler {
     return new Set(this.readState().labels[label] ?? []);
   }
 
-  /** Durably add (or, with `forget`, remove) approved identities, merging with concurrent writers. */
-  private remember(label: string, identities: Iterable<string>, forget = false): void {
+  /** Durably record approved identities, merging with concurrent writers. */
+  private remember(label: string, identities: Iterable<string>): void {
     withFileLock(this.path, () => {
       const state = this.readState();
       const current = new Set(state.labels[label] ?? []);
       const before = current.size;
-      for (const id of identities) if (forget) current.delete(id); else current.add(id);
+      for (const id of identities) current.add(id);
       if (current.size === before) return;
       state.labels[label] = [...current];
       writeOwnerOnlyJsonAtomically(this.path, state);
@@ -160,8 +160,9 @@ export class ReplyLabeler {
       let policy: string | undefined;
       try { policy = this.getLabelFolder(); } catch { break; }
       if (policy !== label) break;
-      // Record the approval before exposing the reply, so a later removal
-      // always sticks; forget it only if the COPY definitely did not happen.
+      // Record the attempt before exposing the reply, so a later removal always
+      // sticks. A COPY's outcome can be unknown, so a failed attempt is never
+      // retried: at worst that reply stays hidden until the owner labels it.
       this.remember(label, [identity]);
       try {
         await withBackgroundAccountMailMutation({
@@ -170,8 +171,7 @@ export class ReplyLabeler {
         }, () => this.imap.copyVerifiedToFolder(entry.uid, label, folder, headers => headers.internalId === identity));
         labeled++;
       } catch (error) {
-        if (!(await approvedNow()).has(identity)) this.remember(label, [identity], true);
-        logger.warn("Could not label a reply to approved mail; will retry", "ReplyLabels", error);
+        logger.warn("Could not label a reply to approved mail; label it manually if it should be visible", "ReplyLabels", error);
       }
     }
     if (labeled) logger.info(`Labeled ${labeled} repl${labeled === 1 ? "y" : "ies"} to approved mail`, "ReplyLabels");

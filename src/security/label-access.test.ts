@@ -256,6 +256,30 @@ describe("transparent backend mail filter", () => {
     expect(locks).not.toContain("Labels");
     expect(warn.mock.calls.filter(([message]) => /Search failed/.test(String(message)))).toEqual([]);
   });
+  it("keeps LIST order for capped wildcard searches, so All Mail is not dropped behind the cap", async () => {
+    const f = fixture();
+    const existing = [...f.mailboxes];
+    f.mailboxes.clear();
+    f.mailboxes.set("All Mail", [{ ...f.approved, uid: "77" }]);
+    existing.forEach(([path, messages]) => f.mailboxes.set(path, messages));
+    for (let i = 0; i < 20; i++) f.mailboxes.set(`Folders/F${i}`, []);
+    for (const path of f.mailboxes.keys()) f.generations.set(path, 1n);
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const found = await f.view.searchEmails({ folders: ["*"] });
+    expect(found.map(email => email.folder)).toContain("All Mail");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("truncated"), "MailboxAccess");
+  });
+  it("fails a scoped multi-folder search instead of returning partial results", async () => {
+    const f = fixture();
+    let sentLocks = 0;
+    const lock = f.client.getMailboxLock.getMockImplementation()!;
+    f.client.getMailboxLock.mockImplementation(async (path: string) => {
+      // The scope read succeeds; the search of the same mailbox then fails.
+      if (path === "Sent" && ++sentLocks === 2) throw new Error("Bridge offline");
+      return lock(path);
+    });
+    await expect(f.view.searchEmails({ folders: ["INBOX", "Sent"] })).rejects.toThrow();
+  });
   it("incremental identity reads never skip UIDs below one cached by a targeted read", async () => {
     const { imap } = fixture();
     await imap.readMailboxEntries("INBOX", ["43"]);

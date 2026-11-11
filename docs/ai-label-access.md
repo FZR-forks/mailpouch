@@ -137,8 +137,9 @@ owner's own replies in that thread (as Proton's sticky labels would). Rules:
   next scan.
 - If any mailbox cannot be read, the scan labels nothing. Right before each COPY
   the worker re-reads the label and the policy, so an anchor whose label was
-  removed mid-scan approves nothing further. Each approval is saved before its
-  COPY, so a later removal always sticks.
+  removed mid-scan approves nothing further. Each attempt is saved before its
+  COPY, so a later removal always sticks; a reply whose labeling fails is not
+  retried (its outcome may be unknown), so label it manually if needed.
 - A message once seen with the label is never labeled again. If the owner removes
   the label from a reply, it stays hidden (state: `.reply-labels-<fingerprint>.json`).
   Removing the label from one message does not stop later replies that reference

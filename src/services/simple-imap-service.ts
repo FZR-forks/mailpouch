@@ -1744,6 +1744,9 @@ export class SimpleIMAPService {
         foldersToSearch.map(f => this.searchSingleFolder(f, options, perFolderLimit, scopes?.get(f)))
       );
 
+      // A scoped (label-filtered) search must not pass off a partial result as complete.
+      const failed = scopes && settled.find(r => r.status === 'rejected');
+      if (failed) throw (failed as PromiseRejectedResult).reason;
       const merged: EmailMessage[] = [];
       settled.forEach((r, i) => {
         if (r.status === 'fulfilled') merged.push(...r.value);

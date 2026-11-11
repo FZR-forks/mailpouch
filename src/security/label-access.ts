@@ -232,10 +232,11 @@ export function labelScopedImap(imap: SimpleIMAPService, folder: string | undefi
     const scopesFor = async function* (paths?: string[], entries?: EmailFolder[], limit?: number, uids?: string[]): AsyncGenerator<MailboxUidScope> {
       const available = entries ?? await rawFolders();
       const availablePaths = new Set(available.map(entry => entry.path));
-      // Like getEmailById, a folderless lookup checks the All Mail union last so a real folder wins.
+      // Like getEmailById, an (uncapped) folderless lookup checks the All Mail
+      // union last so a real folder wins; capped searches keep LIST order.
       const isAllMail = (entry: EmailFolder) => entry.specialUse === "\\All" || entry.path === "All Mail";
-      const requested = paths ? [...new Set(paths.map(normalize))]
-        : [...available.filter(entry => !isAllMail(entry)), ...available.filter(isAllMail)].map(entry => entry.path);
+      const ordered = limit ? available : [...available.filter(entry => !isAllMail(entry)), ...available.filter(isAllMail)];
+      const requested = paths ? [...new Set(paths.map(normalize))] : ordered.map(entry => entry.path);
       if (requested.some(path => !availablePaths.has(path))) {
         throw new McpError(ErrorCode.InvalidParams, "Folder not found");
       }
