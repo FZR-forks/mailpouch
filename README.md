@@ -336,7 +336,7 @@ Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `
   ```bash
   mailpouch agent issue --name nightly-triage --preset read_only
   # → prints client_id + client_secret ONCE; the matching grant is pre-approved (active).
-  # also: mailpouch agent list   /   mailpouch agent revoke <client_id>
+  # also: mailpouch agent list  /  mailpouch agent approve <client_id> --preset <p>  /  mailpouch agent revoke <client_id>
   # (or use the "+ Service account" button in the Agents tab)
 
   curl -s -u "$CLIENT_ID:$CLIENT_SECRET" \
@@ -740,6 +740,12 @@ MIT — see [LICENSE](LICENSE)
 *Unofficial third-party server. Not affiliated with or endorsed by Proton AG.*
 
 [GitHub](https://github.com/chandshy/mailpouch) · [npm](https://www.npmjs.com/package/mailpouch) · [Issues](https://github.com/chandshy/mailpouch/issues) · [Model Context Protocol](https://modelcontextprotocol.io)
+
+### Run with Docker Compose
+
+`compose.yaml` runs MailPouch and a headless Proton Bridge on a server, with
+Bridge reachable only by MailPouch. Bridge's login works with two-factor
+authentication. See [docs/docker.md](docs/docker.md).
 
 ### Restrict agents to an AI label
 

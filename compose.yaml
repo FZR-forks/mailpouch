@@ -1,0 +1,51 @@
+# MailPouch + headless Proton Mail Bridge. Setup: docs/docker.md
+#
+# Bridge publishes no ports: only MailPouch reaches it, over the private
+# `bridge` network. MailPouch's HTTP daemon is published on the host's loopback
+# interface; put a TLS reverse proxy in front of it for remote agents.
+name: mailpouch
+
+services:
+  protonmail-bridge:
+    # Community image of Proton's Bridge, pinned to one immutable build.
+    # https://github.com/dancwilliams/protonmail-bridge-docker
+    image: ghcr.io/dancwilliams/protonmail-bridge-docker:v3.27.1-11@sha256:04b73398443c6e14610ffb257ca01e69c2ef3c0926aa6a0abd5ef64cef07d85f
+    restart: unless-stopped
+    environment:
+      # Optional: encrypt Bridge's keychain at rest (set it before `init`).
+      KEYRING_PASSPHRASE: ${KEYRING_PASSPHRASE:-}
+    volumes:
+      - bridge:/root
+    networks:
+      - bridge
+
+  mailpouch:
+    image: ghcr.io/fzr-forks/mailpouch:${MAILPOUCH_TAG:-latest}
+    build: .
+    restart: unless-stopped
+    depends_on:
+      protonmail-bridge:
+        condition: service_healthy
+    environment:
+      # URL agents use to reach MailPouch (the OAuth issuer), e.g. your proxy.
+      MAILPOUCH_PUBLIC_URL: ${MAILPOUCH_PUBLIC_URL:-http://127.0.0.1:8788}
+      # Global permission ceiling for every agent.
+      MAILPOUCH_PERMISSION_PRESET: ${MAILPOUCH_PERMISSION_PRESET:-supervised}
+      # Optional: only mail with this Proton label is visible to agents. Leaving
+      # it empty keeps the current setting; MAILPOUCH_AI_ACCESS_LABEL_OFF=true
+      # turns the restriction off.
+      MAILPOUCH_AI_ACCESS_LABEL: ${MAILPOUCH_AI_ACCESS_LABEL:-}
+      MAILPOUCH_AI_ACCESS_LABEL_OFF: ${MAILPOUCH_AI_ACCESS_LABEL_OFF:-}
+    volumes:
+      - mailpouch:/data
+    ports:
+      - "${MAILPOUCH_BIND:-127.0.0.1}:8788:8788"
+    networks:
+      - bridge
+
+networks:
+  bridge: {}
+
+volumes:
+  bridge: {}
+  mailpouch: {}

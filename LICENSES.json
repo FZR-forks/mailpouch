@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-10-13",
+  "generatedAt": "2026-11-11",
   "rootPackage": "mailpouch@4.0.5",
   "deps": [
     {
       "name": "@hono/node-server",
-      "version": "2.0.12",
+      "version": "2.1.7",
       "license": "MIT"
     },
     {
@@ -23,6 +23,11 @@
       "license": "MIT"
     },
     {
+      "name": "@napi-rs/keyring-linux-x64-musl",
+      "version": "2.1.1",
+      "license": "MIT"
+    },
+    {
       "name": "@pinojs/redact",
       "version": "0.4.0",
       "license": "MIT"
@@ -35,6 +40,11 @@
     {
       "name": "@zone-eu/mailsplit",
       "version": "5.4.20",
+      "license": "(MIT OR EUPL-1.1+)"
+    },
+    {
+      "name": "@zone-eu/mailsplit",
+      "version": "5.4.30",
       "license": "(MIT OR EUPL-1.1+)"
     },
     {
@@ -64,7 +74,7 @@
     },
     {
       "name": "body-parser",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "license": "MIT"
     },
     {
@@ -90,6 +100,11 @@
     {
       "name": "content-type",
       "version": "1.0.5",
+      "license": "MIT"
+    },
+    {
+      "name": "content-type",
+      "version": "2.1.0",
       "license": "MIT"
     },
     {
@@ -173,6 +188,11 @@
       "license": "MIT"
     },
     {
+      "name": "encoding-japanese",
+      "version": "2.5.0",
+      "license": "MIT"
+    },
+    {
       "name": "entities",
       "version": "4.5.0",
       "license": "BSD-2-Clause"
@@ -234,7 +254,7 @@
     },
     {
       "name": "fast-uri",
-      "version": "4.2.2",
+      "version": "4.2.3",
       "license": "BSD-3-Clause"
     },
     {
@@ -299,7 +319,7 @@
     },
     {
       "name": "hono",
-      "version": "4.13.7",
+      "version": "4.13.18",
       "license": "MIT"
     },
     {
@@ -383,13 +403,28 @@
       "license": "MIT"
     },
     {
+      "name": "libbase64",
+      "version": "1.4.1",
+      "license": "MIT"
+    },
+    {
       "name": "libmime",
       "version": "5.4.7",
       "license": "MIT"
     },
     {
+      "name": "libmime",
+      "version": "5.6.4",
+      "license": "MIT"
+    },
+    {
       "name": "libqp",
       "version": "2.1.2",
+      "license": "MIT"
+    },
+    {
+      "name": "libqp",
+      "version": "3.0.1",
       "license": "MIT"
     },
     {
@@ -399,7 +434,7 @@
     },
     {
       "name": "mailparser",
-      "version": "3.9.38",
+      "version": "3.14.3",
       "license": "MIT"
     },
     {
@@ -444,7 +479,7 @@
     },
     {
       "name": "nodemailer",
-      "version": "10.1.0",
+      "version": "10.5.0",
       "license": "MIT-0"
     },
     {
@@ -534,7 +569,7 @@
     },
     {
       "name": "qs",
-      "version": "6.16.0",
+      "version": "6.17.1",
       "license": "BSD-3-Clause"
     },
     {
@@ -709,7 +744,7 @@
     },
     {
       "name": "zod",
-      "version": "4.3.6",
+      "version": "4.6.7",
       "license": "MIT"
     },
     {

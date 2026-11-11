@@ -71,7 +71,7 @@ Commands:
   doctor [--json]     Diagnose the install/connection; prints the next step, exits
   status [--json]     Show whether mailpouch is running, its ports, connection, and
                       approved agents — read-only, exits (does not start a server)
-  agent <issue|list|revoke …>   Manage headless service accounts
+  agent <issue|list|approve|revoke …>  Manage agents and service accounts
   daemon [--host H] [--port P]  Run the shared HTTP daemon (forces HTTP transport)
 
 Flags:
