@@ -162,7 +162,10 @@ export function parseIdentityHeaders(raw: Buffer | undefined): MessageIdentityHe
     const found = values.get(key);
     return found?.length === 1 && found[0] ? found[0] : undefined;
   };
-  return { internalId: single("x-pm-internal-id"), messageId: single("message-id")?.match(/<[^<>\s]+>/)?.[0].toLowerCase() };
+  // The Message-ID proves which message a background COPY touches: accept only
+  // a value that is exactly one <id>, never one with extra content around it.
+  const messageId = single("message-id");
+  return { internalId: single("x-pm-internal-id"), messageId: messageId && /^<[^<>\s]+>$/.test(messageId) ? messageId.toLowerCase() : undefined };
 }
 
 export class SimpleIMAPService {

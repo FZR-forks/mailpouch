@@ -285,6 +285,9 @@ describe("transparent backend mail filter", () => {
       .toEqual({ internalId: "abc==", messageId: "<self@x>" });
     expect(parseIdentityHeaders(Buffer.from("X-Pm-Internal-Id: real\r\nX-Pm-Internal-Id: spoof\r\n\r\n")).internalId).toBeUndefined();
     expect(parseIdentityHeaders(undefined)).toEqual({ internalId: undefined, messageId: undefined });
+    // A Message-ID with extra content around it proves nothing.
+    expect(parseIdentityHeaders(Buffer.from("Message-ID: <a@x>.other\r\n\r\n")).messageId).toBeUndefined();
+    expect(parseIdentityHeaders(Buffer.from("Message-ID: junk <a@x>\r\n\r\n")).messageId).toBeUndefined();
   });
   it("refreshes label membership between multi-folder operations", async () => {
     const { view, client, mailboxes } = fixture();
