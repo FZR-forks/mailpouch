@@ -88,9 +88,10 @@ export interface HttpTransportOptions {
    */
   serviceAccounts?: ServiceAccountStore;
   /**
-   * Optional path for persisting issued OAuth access-token hashes so they
+   * Optional path for persisting public DCR clients and OAuth token hashes so they
    * survive a daemon restart (field finding #7). Only hashes + metadata are
-   * written (0600) — never raw bearers. When omitted, tokens are in-memory only.
+   * written (0600) — never raw bearers or service-account secrets. When omitted,
+   * clients and tokens are in-memory only.
    */
   oauthTokensPath?: string;
 }

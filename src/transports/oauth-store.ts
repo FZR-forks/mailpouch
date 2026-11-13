@@ -1,8 +1,8 @@
 /**
- * In-memory stores for the OAuth 2.1 authorization server.
+ * OAuth 2.1 authorization-server state with optional durable persistence.
  *
- * Codes (60s TTL) and DCR clients are process-local: a restart drops codes
- * (short-lived anyway) and clients re-register on demand.
+ * Authorization codes (60s TTL) are process-local and single-use. Public DCR
+ * clients persist alongside token hashes so cached client IDs survive restarts.
  *
  * Issued ACCESS TOKENS are optionally persisted (when the store is constructed
  * with a path) so they survive a daemon restart — without persistence, a
@@ -89,18 +89,42 @@ export class OAuthStore {
    * restart (XPORT/#7 — a restart used to drop the in-memory Map and 401 every
    * live token, silently breaking headless/static-config clients). Only the
    * token HASH (the Map key) + metadata are written — never the raw bearer — so
-   * a leaked file cannot be replayed as a credential. Codes (60s TTL) and DCR
-   * clients are intentionally NOT persisted.
+   * a leaked file cannot be replayed as a credential. Public DCR registration
+   * metadata also persists; codes and confidential service clients do not.
    */
   constructor(private readonly persistPath?: string) {
     if (persistPath) this.load();
   }
 
+  /** Only public authorization-code clients belong in this store. Service
+   * accounts retain their own durable credential authority. */
+  private static isPublicClient(value: unknown): value is RegisteredClient {
+    if (!value || typeof value !== "object") return false;
+    const c = value as Partial<RegisteredClient>;
+    return typeof c.client_id === "string" && /^pmc_[0-9a-f]{32}$/.test(c.client_id)
+      && typeof c.client_id_issued_at === "number" && Number.isFinite(c.client_id_issued_at)
+      && (c.client_name === undefined || typeof c.client_name === "string")
+      && Array.isArray(c.redirect_uris) && c.redirect_uris.length > 0
+      && c.redirect_uris.every(uri => typeof uri === "string")
+      && Array.isArray(c.grant_types) && c.grant_types.length === 1 && c.grant_types[0] === "authorization_code"
+      && Array.isArray(c.response_types) && c.response_types.length === 1 && c.response_types[0] === "code"
+      && c.token_endpoint_auth_method === "none"
+      && (c.scope === undefined || typeof c.scope === "string")
+      && c.client_secret === undefined;
+  }
+
   private load(): void {
     try {
       if (!this.persistPath || !existsSync(this.persistPath)) return;
-      const raw = JSON.parse(readFileSync(this.persistPath, "utf-8")) as { tokens?: Array<{ h: string; r: IssuedToken }> };
+      const raw = JSON.parse(readFileSync(this.persistPath, "utf-8")) as { clients?: unknown[]; tokens?: Array<{ h: string; r: IssuedToken }> };
       const now = Date.now();
+      if (Array.isArray(raw.clients)) {
+        for (const client of raw.clients) {
+          if (!OAuthStore.isPublicClient(client)) continue;
+          if (this.clients.size >= OAUTH_MAX_CLIENTS) this.evictOldest(this.clients);
+          this.clients.set(client.client_id, client);
+        }
+      }
       for (const entry of raw.tokens ?? []) {
         const { h, r } = entry;
         if (!h || !r || typeof r.expiresAt !== "number" || now > r.expiresAt) continue;
@@ -119,8 +143,16 @@ export class OAuthStore {
     try {
       // Hashes only — the raw bearer is blanked so a leaked file can't be replayed.
       const tokens = Array.from(this.tokens.entries()).map(([h, r]) => ({ h, r: { ...r, token: "" } }));
+      const clients = Array.from(this.clients.values())
+        .filter(OAuthStore.isPublicClient)
+        .map(c => ({
+          client_id: c.client_id, client_id_issued_at: c.client_id_issued_at,
+          client_name: c.client_name, redirect_uris: c.redirect_uris,
+          grant_types: c.grant_types, response_types: c.response_types,
+          token_endpoint_auth_method: c.token_endpoint_auth_method, scope: c.scope,
+        }));
       const tmp = `${this.persistPath}.${randomBytes(6).toString("hex")}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ version: 1, tokens }), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ version: 2, clients, tokens }), { mode: 0o600 });
       renameSync(tmp, this.persistPath);
     } catch {
       // Best-effort — a failed persist must not break token issuance/verification.
@@ -162,6 +194,7 @@ export class OAuthStore {
     };
     if (this.clients.size >= OAUTH_MAX_CLIENTS) this.evictOldest(this.clients);
     this.clients.set(id, record);
+    this.persist();
     return record;
   }
 

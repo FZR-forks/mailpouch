@@ -767,6 +767,22 @@ describe("HTTP transport", () => {
       }, 15_000);
     });
 
+    it("accepts a registered client after a transport restart", async () => {
+      const oauthTokensPath = join(tmpdir(), `mp-oauth-restart-${randomBytes(6).toString("hex")}.json`);
+      saStorePaths.push(oauthTokensPath);
+      const firstPort = await freePort();
+      handle = await startHttpTransport({ server: buildServer(), port: firstPort, host: "127.0.0.1", oauthEnabled: true, oauthTokensPath });
+      const client = await dcr(`http://127.0.0.1:${firstPort}`);
+      await handle.close();
+      handle = null;
+      const secondPort = await freePort();
+      handle = await startHttpTransport({ server: buildServer(), port: secondPort, host: "127.0.0.1", oauthEnabled: true, oauthTokensPath });
+      const { challenge } = await pkce();
+      const authorized = await getCode(`http://127.0.0.1:${secondPort}`, client.client_id, challenge);
+      expect(authorized.status).toBe(302);
+      expect(authorized.code).toBeTruthy();
+    });
+
     it("serves RFC 9728 oauth-protected-resource metadata", async () => {
       const { url } = await startOauth();
       const res = await fetch(`${url}/.well-known/oauth-protected-resource`);

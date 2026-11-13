@@ -122,3 +122,16 @@ apply. Previously persisted tokens also work across IP changes.
 - **Data:** the `bridge` volume holds Bridge's session and mail cache; the
   `mailpouch` volume holds MailPouch's config (including the Bridge password),
   agent grants, and queues. Back up and protect both.
+
+## OAuth registrations across restarts
+
+Public OAuth client registrations and token hashes persist in MailPouch's private
+data volume. ChatGPT can reuse its registered client ID after an upgrade or
+restart. Authorization codes remain short-lived and process-local; retry login
+if a restart interrupts an in-progress exchange. Service-account credentials
+remain in their separate store.
+
+When upgrading from a version that kept registrations only in memory, recreate
+an existing ChatGPT app connection once to register a fresh client. Old missing
+registrations cannot be recovered from token hashes alone. Agent approval and
+expiry still apply to every client.

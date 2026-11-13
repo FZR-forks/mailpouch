@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { OAuthStore, OAUTH_CODE_TTL_MS, OAUTH_ACCESS_TOKEN_TTL_MS } from "./oauth-store.js";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -181,6 +181,65 @@ describe("OAuthStore", () => {
     let dir: string; let path: string;
     beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "mp-oauth-")); path = join(dir, "tokens.json"); });
     afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+    const publicClient = {
+      client_name: "ChatGPT",
+      redirect_uris: ["https://chatgpt.com/callback"],
+      grant_types: ["authorization_code"], response_types: ["code"],
+      token_endpoint_auth_method: "none", scope: "mcp:full",
+    };
+
+    it("persists a public client immediately, before any token is issued", () => {
+      const a = new OAuthStore(path);
+      const client = a.registerClient(publicClient);
+      const b = new OAuthStore(path);
+      expect(b.getClient(client.client_id)).toEqual(client);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    it("retains public clients after subsequent token persistence", () => {
+      const a = new OAuthStore(path);
+      const client = a.registerClient(publicClient);
+      const token = a.issueToken({ clientId: client.client_id, scopes: ["mcp:full"] });
+      const b = new OAuthStore(path);
+      expect(b.getClient(client.client_id)).toEqual(client);
+      expect(b.verifyToken(token.token)?.clientId).toBe(client.client_id);
+      expect(readFileSync(path, "utf8")).not.toContain(token.token);
+    });
+
+    it("does not persist service-account secrets or single-use authorization codes", () => {
+      const a = new OAuthStore(path);
+      const client = a.registerClient(publicClient);
+      a.registerServiceClient({ ...client, client_id: "service-account", client_secret: "service-secret", grant_types: ["client_credentials"], token_endpoint_auth_method: "client_secret_basic" });
+      const code = a.issueAuthCode({ clientId: client.client_id, redirectUri: publicClient.redirect_uris[0]!, codeChallenge: "x", codeChallengeMethod: "S256", scopes: [] });
+      a.issueToken({ clientId: client.client_id, scopes: [] });
+      expect(readFileSync(path, "utf8")).not.toContain("service-secret");
+      expect(readFileSync(path, "utf8")).not.toContain(code.code);
+      const b = new OAuthStore(path);
+      expect(b.getClient("service-account")).toBeUndefined();
+      expect(b.consumeAuthCode(code.code)).toBeNull();
+    });
+
+    it("loads old token-only files without requiring a clients field", () => {
+      const a = new OAuthStore(path);
+      const token = a.issueToken({ clientId: "pmc_legacy", scopes: [] });
+      const raw = JSON.parse(readFileSync(path, "utf8")) as { version: number; clients?: unknown[] };
+      raw.version = 1;
+      delete raw.clients;
+      writeFileSync(path, JSON.stringify(raw));
+      expect(new OAuthStore(path).verifyToken(token.token)?.clientId).toBe("pmc_legacy");
+    });
+
+    it("skips malformed and confidential persisted client records", () => {
+      const a = new OAuthStore(path);
+      const client = a.registerClient(publicClient);
+      const raw = JSON.parse(readFileSync(path, "utf8")) as { clients: unknown[] };
+      raw.clients = [null, {}, { ...client, client_secret: "unexpected-secret" }, client];
+      writeFileSync(path, JSON.stringify(raw));
+      const b = new OAuthStore(path);
+      expect(b.stats().clients).toBe(1);
+      expect(b.getClient(client.client_id)).toEqual(client);
+    });
 
     it("a token issued by one store is valid in a fresh store loaded from disk", () => {
       const a = new OAuthStore(path);
