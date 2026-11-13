@@ -476,7 +476,6 @@ export class OAuthHandlers {
       clientId: auth.clientId,
       scopes: auth.scopes,
       resource: auth.resource ?? resource,
-      issuedFromIp: clientIp(req),
     });
 
     json(res, 200, {
@@ -512,7 +511,6 @@ export class OAuthHandlers {
     const issued = this.store.issueToken({
       clientId: creds.clientId,
       scopes: [...SCOPES],
-      issuedFromIp: clientIp(req),
     });
     json(res, 200, {
       access_token: issued.token,

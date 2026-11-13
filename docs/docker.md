@@ -104,6 +104,12 @@ a loopback peer. Agents are still told apart by their own OAuth identity, but
 per-agent IP pins cannot distinguish them, and the per-IP limit on the
 unauthenticated OAuth endpoints is shared by all clients.
 
+OAuth bearer tokens are not automatically bound to the IP that requested them.
+Token exchange and MCP requests can therefore use different proxies or Docker
+network paths. Explicit per-agent IP pins remain available when required;
+PKCE, token expiry, resource binding, and live grant approval/revocation still
+apply. Previously persisted tokens also work across IP changes.
+
 ## Maintenance
 
 - **Logs:** `docker compose logs -f mailpouch`. A healthy Bridge logs little.

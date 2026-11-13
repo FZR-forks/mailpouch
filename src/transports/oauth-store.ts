@@ -48,11 +48,6 @@ export interface IssuedToken {
   resource?: string;
   /** ms since epoch. */
   expiresAt: number;
-  /** Client IP at issuance. When set, verifyToken() rejects requests from a
-   *  different IP — closes the "issue from loopback, replay from a non-pinned
-   *  remote" gap that bypassed per-agent ipPins on the MCP endpoint. Optional
-   *  for backwards compatibility with tokens issued before this field existed. */
-  issuedFromIp?: string;
 }
 
 export const OAUTH_CODE_TTL_MS = 60_000;                // RFC 6749 §4.1.2: MAX 10 min; we go short
@@ -204,7 +199,7 @@ export class OAuthStore {
     return rec;
   }
 
-  issueToken(args: { clientId: string; scopes: string[]; resource?: string; issuedFromIp?: string }): IssuedToken {
+  issueToken(args: { clientId: string; scopes: string[]; resource?: string }): IssuedToken {
     const token = randomBytes(32).toString("base64url");
     const rec: IssuedToken = {
       token,
@@ -212,7 +207,6 @@ export class OAuthStore {
       scopes: args.scopes,
       resource: args.resource,
       expiresAt: Date.now() + OAUTH_ACCESS_TOKEN_TTL_MS,
-      issuedFromIp: args.issuedFromIp,
     };
     if (this.tokens.size >= OAUTH_MAX_TOKENS) {
       const first = this.tokens.keys().next();

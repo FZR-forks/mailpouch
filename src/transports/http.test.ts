@@ -46,12 +46,13 @@ function newGrantStoreWithPath(): { grants: AgentGrantStore; path: string } {
   return { grants: new AgentGrantStore(p), path: p };
 }
 /** Fetch an access token via the client_credentials grant (HTTP Basic). */
-async function clientCredentialsToken(url: string, clientId: string, secret: string): Promise<{ status: number; token: string }> {
+async function clientCredentialsToken(url: string, clientId: string, secret: string, issuingIp?: string): Promise<{ status: number; token: string }> {
   const res = await fetch(`${url}/oauth/token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Authorization: "Basic " + Buffer.from(`${clientId}:${secret}`).toString("base64"),
+      ...(issuingIp ? { "X-Forwarded-For": issuingIp } : {}),
     },
     body: "grant_type=client_credentials",
   });
@@ -60,13 +61,14 @@ async function clientCredentialsToken(url: string, clientId: string, secret: str
   return { status: res.status, token };
 }
 
-async function mcpInitialize(url: string, token: string): Promise<Response> {
+async function mcpInitialize(url: string, token: string, callerIp?: string): Promise<Response> {
   return fetch(`${url}/mcp`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
       Authorization: `Bearer ${token}`,
+      ...(callerIp ? { "X-Forwarded-For": callerIp } : {}),
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -81,7 +83,7 @@ async function mcpInitialize(url: string, token: string): Promise<Response> {
   });
 }
 
-async function issuePendingInteractiveToken(url: string): Promise<{ clientId: string; token: string }> {
+async function issuePendingInteractiveToken(url: string, issuingIp?: string): Promise<{ clientId: string; token: string }> {
   const redirectUri = "http://localhost:9999/cb";
   const registered = await fetch(`${url}/oauth/register`, {
     method: "POST",
@@ -100,7 +102,10 @@ async function issuePendingInteractiveToken(url: string): Promise<{ clientId: st
   const code = new URL(authorize.headers.get("location") ?? redirectUri).searchParams.get("code") ?? "";
   const tokenResponse = await fetch(`${url}/oauth/token`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      ...(issuingIp ? { "X-Forwarded-For": issuingIp } : {}),
+    },
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -336,6 +341,39 @@ describe("HTTP transport", () => {
       }),
     });
     expect(initRes.status).toBeLessThan(400);
+  });
+
+  it("accepts a service-account token when OAuth and MCP use different proxy IPs", async () => {
+    const port = await freePort();
+    const serviceAccounts = newServiceAccountStore();
+    const grants = newGrantStore();
+    const { account, clientSecret } = serviceAccounts.issue({ name: "split-proxy", preset: "read_only" });
+    grants.ensureActiveServiceGrant({
+      clientId: account.clientId, clientName: account.clientName, preset: account.preset,
+    });
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true,
+      serviceAccounts, agentGrants: grants,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const issued = await clientCredentialsToken(url, account.clientId, clientSecret, "192.0.2.10");
+    expect(issued.status).toBe(200);
+    const response = await mcpInitialize(url, issued.token, "192.0.2.20");
+    expect(response.status).toBe(200);
+    await response.text();
+  });
+
+  it("accepts a PKCE token when OAuth and MCP use different proxy IPs", async () => {
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const { token } = await issuePendingInteractiveToken(url, "192.0.2.10");
+    expect(token).toBeTruthy();
+    const response = await mcpInitialize(url, token, "192.0.2.20");
+    expect(response.status).toBe(200);
+    await response.text();
   });
 
   it("freshly rejects and revokes existing bearer tokens after an external grant revocation", async () => {

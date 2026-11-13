@@ -459,16 +459,6 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
           res.end(JSON.stringify({ error: "invalid_token" }));
           return;
         }
-        // IP pinning at the token layer: if the token recorded its issuing
-        // IP, the request must come from the same IP. Closes the "issue from
-        // loopback, replay from remote" vector even when no per-agent grant
-        // has ipPins set.
-        if (rec.issuedFromIp && rec.issuedFromIp !== caller) {
-          res.statusCode = 401;
-          res.setHeader("WWW-Authenticate", `Bearer realm="mailpouch", error="invalid_token", error_description="token issued for a different client IP"`);
-          res.end(JSON.stringify({ error: "invalid_token" }));
-          return;
-        }
 
         ok = true;
         tokenKey = `oauth:${rec.clientId}`;
