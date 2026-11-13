@@ -194,7 +194,8 @@ describe("OAuthStore", () => {
       const client = a.registerClient(publicClient);
       const b = new OAuthStore(path);
       expect(b.getClient(client.client_id)).toEqual(client);
-      expect(statSync(path).mode & 0o777).toBe(0o600);
+      // Windows reports writable files as 0666; Unix mode bits do not model its ACLs.
+      if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
     });
 
     it("retains public clients after subsequent token persistence", () => {
