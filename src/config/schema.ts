@@ -260,7 +260,10 @@ export interface ConnectionSettings {
    * The global permission preset (and the AI access label, when set) are the
    * only limits. Intended for deployments where the MCP endpoint is already
    * private (VPN, SSH or an authenticated tunnel). An owner revoke still sticks:
-   * a revoked client is never re-activated automatically.
+   * a revoked client_id is never re-activated automatically, even after
+   * `agent prune` removes its grant record (it gets a pending request instead).
+   * A client that registers again receives a new client_id, which auto-approve
+   * admits like any other new client.
    */
   remoteAutoApproveAgents?: boolean;
   /** Sustained requests/sec per caller (default 20). */

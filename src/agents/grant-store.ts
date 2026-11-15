@@ -31,6 +31,16 @@ export { hourlyQuotaPathForGrantPath, type HourlyToolReservation } from "./hourl
 interface StoreFile {
   version: 1;
   grants: AgentGrant[];
+  /**
+   * Client IDs the owner revoked or denied. Kept after `prune` deletes the
+   * grant record so auto-approve never re-activates a revoked client_id; such
+   * a client gets a pending request instead.
+   */
+  revokedClientIds?: string[];
+}
+
+function parseRevokedClientIds(value: unknown): Set<string> {
+  return new Set(Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);
 }
 
 /** Fresh, disk-backed authorization view used on every security decision. */
@@ -92,6 +102,7 @@ const GRANT_PRESETS = new Set<PermissionPreset>(["full", "read_only", "supervise
 
 export class AgentGrantStore {
   private grants = new Map<string, AgentGrant>();
+  private revokedClientIds = new Set<string>();
   private readonly path: string;
   /** Durable SQLite ledger shared by every daemon using this grants profile. */
   private readonly hourlyQuotaLedger: HourlyQuotaLedger;
@@ -113,9 +124,11 @@ export class AgentGrantStore {
           this.grants.set(g.clientId, g);
         }
       }
+      this.revokedClientIds = parseRevokedClientIds(parsed.revokedClientIds);
     } catch (err) {
       logger.warn(`AgentGrantStore: failed to parse ${this.path}, starting empty`, "AgentGrantStore", err);
       this.grants.clear();
+      this.revokedClientIds.clear();
     }
   }
 
@@ -151,6 +164,7 @@ export class AgentGrantStore {
     // in-memory map here would let the next persist() resurrect every grant.
     if (!existsSync(this.path)) {
       this.grants.clear();
+      this.revokedClientIds.clear();
       return;
     }
     try {
@@ -174,6 +188,7 @@ export class AgentGrantStore {
       for (const clientId of [...this.grants.keys()]) {
         if (!seen.has(clientId)) this.grants.delete(clientId);
       }
+      this.revokedClientIds = parseRevokedClientIds(parsed.revokedClientIds);
     } catch (err) {
       // Refuse the mutation: persisting the stale map would overwrite the
       // unreadable file and undo whatever a peer last wrote (e.g. a revoke).
@@ -183,7 +198,11 @@ export class AgentGrantStore {
   }
 
   private persist(): void {
-    const payload: StoreFile = { version: 1, grants: [...this.grants.values()] };
+    const payload: StoreFile = {
+      version: 1,
+      grants: [...this.grants.values()],
+      ...(this.revokedClientIds.size > 0 ? { revokedClientIds: [...this.revokedClientIds] } : {}),
+    };
     writeOwnerOnlyJsonAtomically(this.path, payload);
   }
 
@@ -193,7 +212,12 @@ export class AgentGrantStore {
    * an MCP host retrying on a disconnected tunnel).
    */
   createPending(args: CreatePendingArgs): AgentGrant {
-    return this.mutate(() => {
+    return this.mutate(() => this.createPendingLocked(args));
+  }
+
+  /** createPending's body; the caller must already hold the store lock. */
+  private createPendingLocked(args: CreatePendingArgs): AgentGrant {
+    {
       const existing = this.grants.get(args.clientId);
       if (existing) return existing;
 
@@ -220,14 +244,16 @@ export class AgentGrantStore {
       this.persist();
       notifications.emitGrantChanged("grant-created", grant);
       return grant;
-    });
+    }
   }
 
   /**
    * Auto-approve mode: make sure an interactive OAuth client has an active
    * grant. A missing grant is created active and a pending one is activated.
    * Active, revoked and expired grants are left exactly as they are, so an
-   * owner's revoke is never undone by the client reconnecting. The preset is
+   * owner's revoke is never undone by the client reconnecting. A client_id the
+   * owner revoked whose grant was later pruned gets a pending request instead,
+   * so pruning never turns a revocation into access. The preset is
    * `full` because the global preset is always intersected as the ceiling: the
    * deployment's single MAILPOUCH_PERMISSION_PRESET decides what agents can do.
    */
@@ -235,6 +261,7 @@ export class AgentGrantStore {
     return this.mutate(() => {
       const existing = this.grants.get(args.clientId);
       if (existing && existing.status !== "pending") return existing;
+      if (this.revokedClientIds.has(args.clientId)) return this.createPendingLocked(args);
       const now = new Date().toISOString();
       const grant: AgentGrant = existing ?? {
         clientId: args.clientId,
@@ -339,6 +366,7 @@ export class AgentGrantStore {
       g.note = args.note;
       g.approvedAt = new Date().toISOString();
       g.revokedAt = undefined;
+      this.revokedClientIds.delete(args.clientId);
       this.persist();
       notifications.emitGrantChanged("grant-approved", g);
       return g;
@@ -353,6 +381,7 @@ export class AgentGrantStore {
       g.status = "revoked";
       g.revokedAt = new Date().toISOString();
       g.note = note ?? g.note;
+      this.revokedClientIds.add(clientId);
       this.persist();
       // Distinguish "deny" (never-approved pending grant rejected) from
       // "revoke" (previously-approved grant taken back) for UI filtering.
@@ -517,7 +546,12 @@ export class AgentGrantStore {
   prune(retainDays = 90, now = Date.now()): number {
     return this.mutate(() => {
       const doomed = this.listPrunable(retainDays, now);
-      for (const g of doomed) this.grants.delete(g.clientId);
+      for (const g of doomed) {
+        this.grants.delete(g.clientId);
+        // Older stores revoked without recording a marker; add it here so the
+        // revocation outlives the record.
+        if (g.status === "revoked") this.revokedClientIds.add(g.clientId);
+      }
       if (doomed.length > 0) this.persist();
       return doomed.length;
     });

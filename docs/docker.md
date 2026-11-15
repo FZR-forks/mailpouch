@@ -95,8 +95,10 @@ The per-agent preset can only narrow `MAILPOUCH_PERMISSION_PRESET`.
 To skip this step, set `MAILPOUCH_AUTO_APPROVE_AGENTS=true`: every client that
 completes OAuth is active right away, with `MAILPOUCH_PERMISSION_PRESET` (and
 the AI access label, when set) as its only limits. `mailpouch agent revoke`
-still blocks a client for good. Use this only when `/mcp` is reachable solely
-through a private path, such as a VPN or an authenticated MCP tunnel.
+still blocks that `client_id` for good, even after `agent prune`. Anything that
+can reach `/mcp` can register a new client and be admitted, so use this only
+when `/mcp` is reachable solely through a private path, such as a VPN or an
+authenticated MCP tunnel.
 
 Whichever mode you use, a known client that signs in again after its approval
 request expired gets a new request (or, with auto-approve, access) instead of
