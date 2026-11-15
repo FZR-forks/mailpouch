@@ -36,6 +36,10 @@ services:
       # turns the restriction off.
       MAILPOUCH_AI_ACCESS_LABEL: ${MAILPOUCH_AI_ACCESS_LABEL:-}
       MAILPOUCH_AI_ACCESS_LABEL_OFF: ${MAILPOUCH_AI_ACCESS_LABEL_OFF:-}
+      # true: agents that complete OAuth are active immediately, limited by the
+      # preset above (no `mailpouch agent approve`). Only use it when /mcp is
+      # private (VPN, SSH tunnel, authenticated MCP tunnel).
+      MAILPOUCH_AUTO_APPROVE_AGENTS: ${MAILPOUCH_AUTO_APPROVE_AGENTS:-}
     volumes:
       - mailpouch:/data
     ports:

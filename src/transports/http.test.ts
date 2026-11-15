@@ -118,6 +118,24 @@ async function issuePendingInteractiveToken(url: string, issuingIp?: string): Pr
   return { clientId, token };
 }
 
+/** Run authorize + token for an already-registered client (as a host reusing its client_id). */
+async function exchangeCodeForClient(url: string, clientId: string): Promise<string> {
+  const redirectUri = "http://localhost:9999/cb";
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const authorize = await fetch(`${url}/oauth/authorize?${new URLSearchParams({
+    client_id: clientId, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: "S256",
+  }).toString()}`, { redirect: "manual" });
+  const code = new URL(authorize.headers.get("location") ?? redirectUri).searchParams.get("code") ?? "";
+  const tokenResponse = await fetch(`${url}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier }).toString(),
+  });
+  const { access_token: token } = await tokenResponse.json() as { access_token: string };
+  return token;
+}
+
 function fakeReq(remote: string, headers: Record<string, string | undefined> = {}): IncomingMessage {
   return {
     socket: { remoteAddress: remote } as unknown,
@@ -523,6 +541,71 @@ describe("HTTP transport", () => {
     // Reuse the SAME token after both transient failures. A purge caused by
     // either malformed JSON or EISDIR would leave this request at 401.
     expect((await mcpInitialize(url, issued.token)).status).toBeLessThan(400);
+  });
+
+  it("auto-approve activates an interactive client on registration", async () => {
+    const port = await freePort();
+    const grants = newGrantStore();
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, autoApproveAgents: true,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const issued = await issuePendingInteractiveToken(url);
+    expect(grants.get(issued.clientId)).toMatchObject({ status: "active", preset: "full" });
+    expect((await mcpInitialize(url, issued.token)).status).toBeLessThan(400);
+  });
+
+  it("recreates a missing grant when a persisted client signs in again", async () => {
+    const oauthTokensPath = join(tmpdir(), `mp-oauth-regrant-${randomBytes(6).toString("hex")}.json`);
+    saStorePaths.push(oauthTokensPath);
+    const { grants, path } = newGrantStoreWithPath();
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, oauthTokensPath,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const first = await issuePendingInteractiveToken(url);
+    // The 5-minute sweep deletes the pending grant and revokes its token.
+    grants.expireStalePending(-1);
+    expect(grants.get(first.clientId)).toBeUndefined();
+    expect((await mcpInitialize(url, first.token)).status).toBe(401);
+    await handle.close();
+
+    // Restart with auto-approve; the host reuses its persisted client_id.
+    const grants2 = new AgentGrantStore(path);
+    const port2 = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(), port: port2, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants2, oauthTokensPath, autoApproveAgents: true,
+    });
+    const url2 = `http://127.0.0.1:${port2}`;
+    const token = await exchangeCodeForClient(url2, first.clientId);
+    expect(grants2.get(first.clientId)?.status).toBe("active");
+    expect((await mcpInitialize(url2, token)).status).toBeLessThan(400);
+  });
+
+  it("re-creates a pending request (not access) for a returning client without auto-approve", async () => {
+    const port = await freePort();
+    const grants = newGrantStore();
+    handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants });
+    const url = `http://127.0.0.1:${port}`;
+    const first = await issuePendingInteractiveToken(url);
+    grants.expireStalePending(-1);
+    await exchangeCodeForClient(url, first.clientId);
+    expect(grants.get(first.clientId)?.status).toBe("pending");
+  });
+
+  it("auto-approve keeps a revoked client blocked", async () => {
+    const port = await freePort();
+    const grants = newGrantStore();
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, autoApproveAgents: true,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const first = await issuePendingInteractiveToken(url);
+    grants.revoke(first.clientId);
+    const token = await exchangeCodeForClient(url, first.clientId);
+    expect(grants.get(first.clientId)?.status).toBe("revoked");
+    expect((await mcpInitialize(url, token)).status).toBe(401);
   });
 
   it("preserves pending bearer behavior for the dispatcher to report approval status", async () => {

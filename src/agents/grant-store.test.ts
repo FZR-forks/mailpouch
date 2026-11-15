@@ -28,6 +28,31 @@ describe("AgentGrantStore", () => {
     expect(s.getAuthorizationSnapshot("pmc_missing")).toEqual({ kind: "missing" });
   });
 
+  describe("ensureAutoApproved", () => {
+    it("creates a missing grant as active with the full preset", () => {
+      const s = new AgentGrantStore(path);
+      const g = s.ensureAutoApproved({ clientId: "pmc_auto", clientName: "ChatGPT", registeredFromIp: "10.0.0.1" });
+      expect(g).toMatchObject({ clientId: "pmc_auto", clientName: "ChatGPT", status: "active", preset: "full", registeredFromIp: "10.0.0.1" });
+      expect(g.approvedAt).toBeTruthy();
+      expect(new AgentGrantStore(path).get("pmc_auto")?.status).toBe("active");
+    });
+
+    it("activates a pending grant", () => {
+      const s = new AgentGrantStore(path);
+      s.createPending({ clientId: "pmc_p", clientName: "P" });
+      expect(s.ensureAutoApproved({ clientId: "pmc_p", clientName: "P" }).status).toBe("active");
+    });
+
+    it("never re-activates a revoked grant or changes an active one", () => {
+      const s = new AgentGrantStore(path);
+      s.createPending({ clientId: "pmc_r", clientName: "R" });
+      s.approve({ clientId: "pmc_r", preset: "read_only" });
+      expect(s.ensureAutoApproved({ clientId: "pmc_r", clientName: "R" }).preset).toBe("read_only");
+      s.revoke("pmc_r");
+      expect(s.ensureAutoApproved({ clientId: "pmc_r", clientName: "R" }).status).toBe("revoked");
+    });
+  });
+
   it("reads a fresh authorization snapshot after another store revokes a grant", () => {
     const writer = new AgentGrantStore(path);
     writer.createPending({ clientId: "pmc_1", clientName: "A" });

@@ -81,6 +81,12 @@ export interface HttpTransportOptions {
    */
   agentGrants?: AgentGrantStore;
   /**
+   * When true, an interactive OAuth client is activated as soon as it registers
+   * or exchanges an authorization code, instead of waiting for a human Approve.
+   * Revoked grants stay revoked. Requires `agentGrants`.
+   */
+  autoApproveAgents?: boolean;
+  /**
    * Persisted service accounts (client_credentials grant). When set, each is
    * registered into the OAuth client table (for name display) and the token
    * endpoint accepts the client_credentials grant verified against this store.
@@ -265,7 +271,9 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     // OAuth is always automatic-consent: agents authenticate fully automatically
     // (DCR + PKCE) and the per-agent grant Approve/Deny is the only human gate.
     logger.info(
-      "OAuth enabled (automatic consent): agents self-register and obtain a token automatically; each is inert until you Approve it in the Agents tab, and a pending request expires after 5 minutes.",
+      opts.autoApproveAgents
+        ? "OAuth enabled (automatic consent, auto-approve): agents self-register and are active immediately, limited by the global permission preset."
+        : "OAuth enabled (automatic consent): agents self-register and obtain a token automatically; each is inert until you Approve it in the Agents tab, and a pending request expires after 5 minutes.",
       "HTTPTransport",
     );
   }
@@ -297,14 +305,25 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       if (n > 0) logger.info(`Revoked ${n} OAuth token(s) for client ${ev.grant.clientId} after ${ev.kind}`, "HTTPTransport");
     }
   });
+  // Registration and every authorization-code exchange make sure the client
+  // has a grant. Without the exchange hook, a persisted client whose pending
+  // grant expired (or was deleted) kept receiving tokens that the bearer gate
+  // then rejected as "missing grant", so the host looped on "reconnect" with
+  // nothing left to approve. createPending/ensureAutoApproved never touch an
+  // existing revoked grant.
+  const ensureClientGrant = opts.agentGrants
+    ? (c: { client_id: string; client_name?: string; ip?: string }): void => {
+        const args = { clientId: c.client_id, clientName: c.client_name ?? "", registeredFromIp: c.ip };
+        if (opts.autoApproveAgents) opts.agentGrants!.ensureAutoApproved(args);
+        else opts.agentGrants!.createPending(args);
+      }
+    : undefined;
   const oauthHandlers = opts.oauthEnabled
     ? new OAuthHandlers(
         oauthStore,
         { issuer, resource: `${issuer}${path}` },
         unauthLimiter,
-        opts.agentGrants
-          ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "", registeredFromIp: c.ip })
-          : undefined,
+        ensureClientGrant,
         clientIp,
         opts.serviceAccounts
           ? (clientId, secret) => {
@@ -324,6 +343,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
               return true;
             }
           : undefined,
+        ensureClientGrant,
       )
     : null;
 

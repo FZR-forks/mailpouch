@@ -224,6 +224,40 @@ export class AgentGrantStore {
   }
 
   /**
+   * Auto-approve mode: make sure an interactive OAuth client has an active
+   * grant. A missing grant is created active and a pending one is activated.
+   * Active, revoked and expired grants are left exactly as they are, so an
+   * owner's revoke is never undone by the client reconnecting. The preset is
+   * `full` because the global preset is always intersected as the ceiling: the
+   * deployment's single MAILPOUCH_PERMISSION_PRESET decides what agents can do.
+   */
+  ensureAutoApproved(args: CreatePendingArgs): AgentGrant {
+    return this.mutate(() => {
+      const existing = this.grants.get(args.clientId);
+      if (existing && existing.status !== "pending") return existing;
+      const now = new Date().toISOString();
+      const grant: AgentGrant = existing ?? {
+        clientId: args.clientId,
+        clientName: args.clientName || "(unnamed client)",
+        status: "pending",
+        preset: "full",
+        createdAt: now,
+        totalCalls: 0,
+        ...(args.registeredFromIp ? { registeredFromIp: args.registeredFromIp } : {}),
+      };
+      grant.status = "active";
+      grant.preset = "full";
+      grant.approvedAt = now;
+      grant.note = "auto-approved (remoteAutoApproveAgents)";
+      this.grants.set(args.clientId, grant);
+      this.persist();
+      if (!existing) notifications.emitGrantChanged("grant-created", grant);
+      notifications.emitGrantChanged("grant-approved", grant);
+      return grant;
+    });
+  }
+
+  /**
    * Ensure an *active* grant exists for a service account (client_credentials).
    * Unlike the interactive flow (createPending → approve), a service account is
    * pre-approved out-of-band at issuance, so its grant is born active. Called at
