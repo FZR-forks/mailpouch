@@ -63,6 +63,7 @@ Settings come from the environment (for example a `.env` file next to
 | `MAILPOUCH_PERMISSION_PRESET` | `supervised` | Ceiling for every agent: `full`, `supervised`, `send_only` or `read_only` |
 | `MAILPOUCH_AI_ACCESS_LABEL` | unset | Only mail with this Proton label is visible to agents ([details](ai-label-access.md)). Unset or empty keeps the current setting |
 | `MAILPOUCH_AI_ACCESS_LABEL_OFF` | unset | `true` turns the label restriction off |
+| `MAILPOUCH_AUTO_APPROVE_AGENTS` | unset | `true` activates OAuth agents as soon as they connect, limited by `MAILPOUCH_PERMISSION_PRESET`; `false` requires `agent approve`. Unset keeps the current setting. Only enable it when `/mcp` is private |
 | `MAILPOUCH_BIND` | `127.0.0.1` | Host address the daemon is published on |
 | `MAILPOUCH_TAG` | `latest` | MailPouch image tag (`latest`, a version, or `edge`) |
 | `KEYRING_PASSPHRASE` | unset | Passphrase for Bridge's keychain |
@@ -90,6 +91,18 @@ docker compose exec mailpouch mailpouch agent approve <client_id> --preset super
 ```
 
 The per-agent preset can only narrow `MAILPOUCH_PERMISSION_PRESET`.
+
+To skip this step, set `MAILPOUCH_AUTO_APPROVE_AGENTS=true`: every client that
+completes OAuth is active right away, with `MAILPOUCH_PERMISSION_PRESET` (and
+the AI access label, when set) as its only limits. `mailpouch agent revoke`
+still blocks that `client_id` for good, even after `agent prune`. Anything that
+can reach `/mcp` can register a new client and be admitted, so use this only
+when `/mcp` is reachable solely through a private path, such as a VPN or an
+authenticated MCP tunnel.
+
+Whichever mode you use, a known client that signs in again after its approval
+request expired gets a new request (or, with auto-approve, access) instead of
+being rejected on every call.
 
 ## Exposing MailPouch beyond the server
 

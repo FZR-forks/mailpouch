@@ -3486,6 +3486,7 @@ async function main() {
         rateLimitPerSecond: remoteCn?.remoteRateLimitPerSecond ?? undefined,
         rateLimitBurst: remoteCn?.remoteRateLimitBurst ?? undefined,
         agentGrants,
+        autoApproveAgents: !!remoteCn?.remoteAutoApproveAgents,
         serviceAccounts,
         oauthTokensPath: OAUTH_TOKENS_PATH,
       });

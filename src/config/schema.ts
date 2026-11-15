@@ -254,6 +254,18 @@ export interface ConnectionSettings {
    * proxy, e.g. https://mcp.example.com.
    */
   remoteOauthIssuer?: string;
+  /**
+   * Activate every OAuth client that completes the authorization-code flow
+   * immediately, with no human Approve/Deny and no 5-minute approval window.
+   * The global permission preset (and the AI access label, when set) are the
+   * only limits. Intended for deployments where the MCP endpoint is already
+   * private (VPN, SSH or an authenticated tunnel). An owner revoke still sticks:
+   * a revoked client_id is never re-activated automatically, even after
+   * `agent prune` removes its grant record (it gets a pending request instead).
+   * A client that registers again receives a new client_id, which auto-approve
+   * admits like any other new client.
+   */
+  remoteAutoApproveAgents?: boolean;
   /** Sustained requests/sec per caller (default 20). */
   remoteRateLimitPerSecond?: number;
   /** Burst size per caller (default 40). */

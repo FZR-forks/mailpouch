@@ -11,6 +11,10 @@
 //                                unset leaves the current setting: losing the
 //                                variable must never lift the restriction.
 //   MAILPOUCH_AI_ACCESS_LABEL_OFF=true   explicitly turn the restriction off
+//   MAILPOUCH_AUTO_APPROVE_AGENTS  true: OAuth clients are active as soon as
+//                                they connect (no `agent approve`); false:
+//                                each needs a human Approve. Unset keeps the
+//                                current setting.
 const { loadConfig, saveConfig, buildPermissions } = await import("/app/dist/config/loader.js");
 const { PERMISSION_PRESETS } = await import("/app/dist/config/schema.js");
 
@@ -42,4 +46,12 @@ if (label && env.MAILPOUCH_AI_ACCESS_LABEL_OFF === "true") {
 }
 if (label) config.aiAccessLabel = label;
 else if (env.MAILPOUCH_AI_ACCESS_LABEL_OFF === "true") config.aiAccessLabel = "";
+const autoApprove = env.MAILPOUCH_AUTO_APPROVE_AGENTS?.trim().toLowerCase();
+if (autoApprove) {
+  if (autoApprove !== "true" && autoApprove !== "false") {
+    console.error("MAILPOUCH_AUTO_APPROVE_AGENTS must be true or false.");
+    process.exit(1);
+  }
+  config.connection.remoteAutoApproveAgents = autoApprove === "true";
+}
 saveConfig(config);

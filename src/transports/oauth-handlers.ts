@@ -214,6 +214,11 @@ export class OAuthHandlers {
    *  this module stays free of the agents-layer import. When absent, the
    *  client_credentials grant is rejected (deployment issued no service accounts). */
   private readonly verifyClientCredentials?: (clientId: string, secret: string) => boolean;
+  /** Called after an authorization code is validated and before its token is
+   *  issued, so the transport can make sure the client still has a grant (a
+   *  persisted client whose pending grant expired would otherwise get tokens
+   *  that are rejected on every MCP call). Errors are logged and ignored. */
+  private readonly onAuthorizationCodeExchanged?: (c: { client_id: string; client_name?: string; ip?: string }) => void;
 
   constructor(
     store: OAuthStore,
@@ -222,6 +227,7 @@ export class OAuthHandlers {
     onClientRegistered?: (c: { client_id: string; client_name?: string; ip?: string }) => void,
     ipExtractor?: (req: IncomingMessage) => string,
     verifyClientCredentials?: (clientId: string, secret: string) => boolean,
+    onAuthorizationCodeExchanged?: (c: { client_id: string; client_name?: string; ip?: string }) => void,
   ) {
     this.store = store;
     this.cfg = cfg;
@@ -229,6 +235,7 @@ export class OAuthHandlers {
     this.onClientRegistered = onClientRegistered;
     this.ipExtractor = ipExtractor;
     this.verifyClientCredentials = verifyClientCredentials;
+    this.onAuthorizationCodeExchanged = onAuthorizationCodeExchanged;
     // Authorize is always automatic-consent (there is no admin password): the
     // per-agent grant Approve/Deny is the only human gate (see handleAuthorizeGet).
   }
@@ -471,6 +478,12 @@ export class OAuthHandlers {
       error(res, 400, "invalid_grant", "Invalid authorization code.");
       return { handled: true };
     }
+
+    try {
+      const ip = this.ipExtractor?.(req);
+      this.onAuthorizationCodeExchanged?.({ client_id: auth.clientId, client_name: this.store.getClient(auth.clientId)?.client_name, ip });
+    }
+    catch (hookErr) { logger.warn("onAuthorizationCodeExchanged hook threw (non-fatal)", "OAuth", hookErr); }
 
     const issued = this.store.issueToken({
       clientId: auth.clientId,

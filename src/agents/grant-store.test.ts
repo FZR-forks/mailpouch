@@ -28,6 +28,59 @@ describe("AgentGrantStore", () => {
     expect(s.getAuthorizationSnapshot("pmc_missing")).toEqual({ kind: "missing" });
   });
 
+  describe("ensureAutoApproved", () => {
+    it("creates a missing grant as active with the full preset", () => {
+      const s = new AgentGrantStore(path);
+      const g = s.ensureAutoApproved({ clientId: "pmc_auto", clientName: "ChatGPT", registeredFromIp: "10.0.0.1" });
+      expect(g).toMatchObject({ clientId: "pmc_auto", clientName: "ChatGPT", status: "active", preset: "full", registeredFromIp: "10.0.0.1" });
+      expect(g.approvedAt).toBeTruthy();
+      expect(new AgentGrantStore(path).get("pmc_auto")?.status).toBe("active");
+    });
+
+    it("activates a pending grant", () => {
+      const s = new AgentGrantStore(path);
+      s.createPending({ clientId: "pmc_p", clientName: "P" });
+      expect(s.ensureAutoApproved({ clientId: "pmc_p", clientName: "P" }).status).toBe("active");
+    });
+
+    it("never re-activates a revoked grant or changes an active one", () => {
+      const s = new AgentGrantStore(path);
+      s.createPending({ clientId: "pmc_r", clientName: "R" });
+      s.approve({ clientId: "pmc_r", preset: "read_only" });
+      expect(s.ensureAutoApproved({ clientId: "pmc_r", clientName: "R" }).preset).toBe("read_only");
+      s.revoke("pmc_r");
+      expect(s.ensureAutoApproved({ clientId: "pmc_r", clientName: "R" }).status).toBe("revoked");
+    });
+
+    it("sends a revoked client to a pending request after prune removes its grant", () => {
+      const s = new AgentGrantStore(path);
+      s.createPending({ clientId: "pmc_x", clientName: "X" });
+      s.approve({ clientId: "pmc_x", preset: "full" });
+      s.revoke("pmc_x");
+      expect(s.prune(0)).toBe(1);
+      expect(s.get("pmc_x")).toBeUndefined();
+      // The marker survives on disk, including for a fresh process.
+      const fresh = new AgentGrantStore(path);
+      expect(fresh.ensureAutoApproved({ clientId: "pmc_x", clientName: "X" }).status).toBe("pending");
+      // An explicit owner approve clears the marker.
+      fresh.approve({ clientId: "pmc_x", preset: "full" });
+      fresh.revoke("pmc_x");
+      fresh.approve({ clientId: "pmc_x", preset: "full" });
+      fresh.prune(0);
+      expect(fresh.get("pmc_x")?.status).toBe("active");
+    });
+
+    it("records the marker when pruning a revoked grant from an older store", () => {
+      writeFileSync(path, JSON.stringify({ version: 1, grants: [{
+        clientId: "pmc_old", clientName: "Old", status: "revoked", preset: "full",
+        createdAt: "2020-01-01T00:00:00.000Z", revokedAt: "2020-01-02T00:00:00.000Z", totalCalls: 0,
+      }] }));
+      const s = new AgentGrantStore(path);
+      expect(s.prune(90)).toBe(1);
+      expect(s.ensureAutoApproved({ clientId: "pmc_old", clientName: "Old" }).status).toBe("pending");
+    });
+  });
+
   it("reads a fresh authorization snapshot after another store revokes a grant", () => {
     const writer = new AgentGrantStore(path);
     writer.createPending({ clientId: "pmc_1", clientName: "A" });
