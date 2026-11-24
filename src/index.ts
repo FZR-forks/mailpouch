@@ -974,7 +974,7 @@ function callerMaySendFrom(accountId: string): boolean {
 /**
  * Put the active account's real sender addresses on the `from` field of the
  * sending tools, so agents pick one instead of inventing an address. With a
- * single account a schema pattern accepts only them; with several it is descriptive only,
+ * single account they are also schema examples; with several it is descriptive only,
  * because an `account_id`-routed call has another account's addresses.
  */
 async function withActiveSenderAddresses(defs: ToolDef[]): Promise<ToolDef[]> {

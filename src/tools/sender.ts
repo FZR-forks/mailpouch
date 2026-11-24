@@ -78,35 +78,13 @@ export async function ownAddresses(ctx: ToolCallContext): Promise<string[]> {
   return lookup.available ? lookup.addresses : [];
 }
 
-/** One letter as a case-insensitive character class (JSON Schema patterns have no flags). */
-function caseless(ch: string): string {
-  const lower = ch.toLowerCase();
-  const upper = ch.toUpperCase();
-  if (lower !== upper && ch.length === 1) return `[${lower}${upper}]`;
-  // Only syntax characters: `\-` is an invalid escape in Unicode-mode regexes.
-  return ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-}
-
-/**
- * Pattern matching exactly the listed addresses, in any letter case and with
- * an optional `+tag` on the local part, the same forms resolveSenderAddress
- * accepts.
- */
-export function senderPattern(addresses: readonly string[]): string {
-  const alternatives = addresses.map(address => {
-    const key = senderAddressKey(address);
-    const at = key.lastIndexOf("@");
-    const exact = (text: string) => [...text].map(caseless).join("");
-    return `${exact(key.slice(0, at))}(?:\\+[^@\\s]*)?@${exact(key.slice(at + 1))}`;
-  });
-  return `^(?:${alternatives.join("|")})$`;
-}
-
 /**
  * Advertise the account's sender addresses on every sender tool's `from`
- * field. `enumerate` adds them as `examples` plus a `pattern` that accepts
- * only those addresses (any case, optional `+tag`); only safe when every call
- * goes to the same account (an `account_id`-routed call has other addresses).
+ * field. `enumerate` also lists them as `examples`; only meaningful when every
+ * call goes to the same account (an `account_id`-routed call has other
+ * addresses). No restrictive enum or pattern: it would block `+tag` forms and
+ * addresses added after the client fetched the schema, which the handler
+ * accepts; resolveSenderAddress is the one place that refuses a sender.
  */
 export function withSenderAddressHints(
   defs: ToolDef[],
@@ -119,7 +97,7 @@ export function withSenderAddressHints(
   const scope = opts.accountLabel ? ` (account ${opts.accountLabel}; other accounts have their own addresses)` : "";
   const field = {
     type: "string",
-    ...(opts.enumerate ? { examples: allowed, pattern: senderPattern(allowed) } : {}),
+    ...(opts.enumerate ? { examples: allowed } : {}),
     description:
       `Sender address (optional). This Proton account can send from: ${allowed.join(", ")}${scope}. `
       + `Omit to send from ${opts.login || allowed[0]}. Any other address is rejected.`,

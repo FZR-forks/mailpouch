@@ -15,16 +15,15 @@ addresses:
 "from": {
   "type": "string",
   "examples": ["me@proton.me", "me@pm.me", "hello@example.com"],
-  "pattern": "^(?:[mM][eE](?:\\+[^@\\s]*)?@[pP][rR][oO]...)$",
   "description": "Sender address (optional). This Proton account can send from: me@proton.me, me@pm.me, hello@example.com. Omit to send from me@proton.me. Any other address is rejected."
 }
 ```
 
-- With one configured account the addresses are `examples`, and a `pattern`
-  accepts only them, in any letter case and with an optional `+tag`, the same
-  forms Bridge accepts. With several accounts they are in the description only
-  and name the active account, because a call routed with `account_id` belongs
-  to another account.
+- With one configured account the addresses are also `examples`. With several
+  accounts they are in the description only and name the active account,
+  because a call routed with `account_id` belongs to another account. The
+  schema has no `enum` or `pattern`: it would block `+tag` forms and addresses
+  added after the agent fetched the tool list, which the server accepts.
 - The addresses are listed only for an agent whose grant (and global preset)
   allows a sending tool on the active account. Others, including agents still
   waiting for approval, get the plain schema.
