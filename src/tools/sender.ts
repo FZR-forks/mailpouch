@@ -18,6 +18,18 @@ export const SENDER_TOOLS: ReadonlySet<string> = new Set([
   "send_email", "reply_to_email", "forward_email", "schedule_email",
 ]);
 
+/**
+ * Whether some sending tool is usable: enabled globally AND allowed by the
+ * caller's grant. Both must hold for the same tool; `grantAllows` is
+ * undefined for a trusted caller without a grant gate.
+ */
+export function someSenderToolUsable(
+  enabled: (tool: string) => boolean,
+  grantAllows?: (tool: string) => boolean,
+): boolean {
+  return [...SENDER_TOOLS].some(tool => enabled(tool) && (grantAllows?.(tool) ?? true));
+}
+
 /** Static `from` schema, used when Bridge's address list is unavailable. */
 export const FROM_SCHEMA_FIELD = {
   type: "string",

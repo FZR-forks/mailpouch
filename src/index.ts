@@ -166,7 +166,7 @@ import { shouldSurfaceGrantToast, shouldSurfaceActionToast } from "./notificatio
 import { resolveInvocation, USAGE } from "./cli/invocation.js";
 import { AccountRuntimeRegistry } from "./runtime/account-runtime.js";
 import { BridgeSenderDirectory, type SenderAddressLookup } from "./services/bridge-addresses.js";
-import { withSenderAddressHints } from "./tools/sender.js";
+import { someSenderToolUsable, withSenderAddressHints } from "./tools/sender.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
 // All credentials and connection settings are loaded from ~/.mailpouch.json
@@ -952,24 +952,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
  * no pending grant is created and no rate slot is reserved.
  */
 function callerMaySendFrom(accountId: string): boolean {
-  const senderTools = ["send_email", "reply_to_email", "forward_email", "schedule_email"] as const;
   // Read the enabled flags directly: permissions.check() would spend rate slots.
   const cfg = loadConfig() ?? defaultConfig();
-  if (!senderTools.some(tool => cfg.permissions.tools?.[tool]?.enabled === true)) return false;
+  const enabled = (tool: string) => cfg.permissions.tools?.[tool as ToolName]?.enabled === true;
   let clientId: string | undefined;
   let callerIp: string | undefined;
   const remote = currentCaller();
   if (remote) { clientId = remote.clientId; callerIp = remote.ip; }
   else if (localAgentsGated()) clientId = localAgentId(server.getClientVersion()?.name || "(unnamed local client)");
-  if (!clientId) return true; // trusted local caller with no grant gate
+  if (!clientId) return someSenderToolUsable(enabled); // trusted local caller with no grant gate
   let identity: string;
   try { identity = accountManager.identityForAccount(accountId); } catch { return false; }
   const snapshot = grantManager.getAuthorizationSnapshot(clientId);
-  const globalPreset = cfg.permissions.preset;
-  return senderTools.some(tool => grantManager.check({
-    clientId, tool, args: {}, callerIp,
-    targetAccountId: accountId, targetAccountIdentity: identity, globalPreset,
-  }, { reserveHourlyToolSlot: false, snapshot }).allowed);
+  const grantAllows = (tool: string) => grantManager.check({
+    clientId: clientId as string, tool, args: {}, callerIp,
+    targetAccountId: accountId, targetAccountIdentity: identity, globalPreset: cfg.permissions.preset,
+  }, { reserveHourlyToolSlot: false, snapshot }).allowed;
+  return someSenderToolUsable(enabled, grantAllows);
 }
 
 /**

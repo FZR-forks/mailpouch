@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { resolveSenderAddress, senderPattern, withSenderAddressHints, SENDER_TOOLS } from "./sender.js";
+import { resolveSenderAddress, senderPattern, someSenderToolUsable, withSenderAddressHints, SENDER_TOOLS } from "./sender.js";
 import * as sending from "./sending.js";
 import * as drafts from "./drafts.js";
 import type { ToolCallContext, ToolDef, ToolResult } from "./types.js";
@@ -49,6 +49,16 @@ describe("resolveSenderAddress", () => {
     const off: SenderAddressLookup = { available: false, reason: "no --grpc" };
     expect(await resolveSenderAddress(ctxWith("other@proton.me", [off]).ctx)).toBe("other@proton.me");
     await expect(resolveSenderAddress(ctxWith("not an email", [off]).ctx)).rejects.toThrow(/valid email/);
+  });
+});
+
+describe("someSenderToolUsable", () => {
+  it("requires the same tool to be both enabled and granted", () => {
+    const only = (name: string) => (tool: string) => tool === name;
+    expect(someSenderToolUsable(only("send_email"), only("reply_to_email"))).toBe(false);
+    expect(someSenderToolUsable(only("send_email"), only("send_email"))).toBe(true);
+    expect(someSenderToolUsable(only("schedule_email"))).toBe(true);
+    expect(someSenderToolUsable(only("send_test_email"))).toBe(false);
   });
 });
 

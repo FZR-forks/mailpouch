@@ -331,8 +331,10 @@ export class BridgeSenderDirectory {
   private readonly failureTtlMs: number;
   private readonly fetchUsers: (configPath: string) => Promise<BridgeUser[]>;
   private readonly now: () => number;
-  private cached?: { at: number; users?: BridgeUser[]; error?: string };
+  private cached?: { at: number; seq: number; users?: BridgeUser[]; error?: string };
   private inFlight?: Promise<BridgeUser[]>;
+  /** Start order of reads, so a slow older read never overwrites a newer result. */
+  private loadSeq = 0;
   private lastLoggedError?: string;
 
   constructor(opts: BridgeSenderDirectoryOptions = {}) {
@@ -382,18 +384,22 @@ export class BridgeSenderDirectory {
   }
 
   private async load(path: string): Promise<BridgeUser[]> {
+    const seq = ++this.loadSeq;
+    const store = (entry: { users?: BridgeUser[]; error?: string }) => {
+      if (!this.cached || seq > this.cached.seq) this.cached = { at: this.now(), seq, ...entry };
+    };
     try {
       if (!existsSync(path)) {
         throw new Error(`Bridge gRPC config not found at ${path} (Bridge must run with --grpc)`);
       }
       const users = await this.fetchUsers(path);
-      this.cached = { at: this.now(), users };
+      store({ users });
       if (this.lastLoggedError !== undefined) logger.info("Bridge sender addresses available again", "BridgeAddresses");
       this.lastLoggedError = undefined;
       return users;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.cached = { at: this.now(), error: message };
+      store({ error: message });
       if (message !== this.lastLoggedError) {
         logger.debug(`Bridge sender addresses unavailable: ${message}`, "BridgeAddresses");
         this.lastLoggedError = message;

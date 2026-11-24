@@ -262,6 +262,20 @@ describe("BridgeSenderDirectory", () => {
     expect(calls).toBe(2);
   });
 
+  it("keeps a fresh read's result when an older read finishes after it", async () => {
+    const releases: Array<(users: BridgeUser[]) => void> = [];
+    const rejects: Array<(err: Error) => void> = [];
+    const dir = directory(() => new Promise((resolve, reject) => { releases.push(resolve); rejects.push(reject); }));
+    const older = dir.lookup("me@proton.me");
+    const fresh = dir.lookup("new@proton.me", { fresh: true });
+    releases[1]([{ ...me, addresses: [...me.addresses, "new@proton.me"] }]);
+    await fresh;
+    rejects[0](new Error("old read failed late"));
+    expect((await older).available).toBe(false);
+    // The cache still holds the fresh list, not the older read's error.
+    expect(await dir.lookup("new@proton.me")).toMatchObject({ available: true, addresses: expect.arrayContaining(["new@proton.me"]) });
+  });
+
   it("shares one in-flight request between concurrent lookups", async () => {
     let calls = 0;
     const dir = directory(async () => { calls++; await new Promise(r => setTimeout(r, 10)); return [me]; });
