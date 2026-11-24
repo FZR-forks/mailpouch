@@ -371,9 +371,12 @@ export class BridgeSenderDirectory {
       if (cached.users && age < this.ttlMs) return cached.users;
       if (cached.error && age < this.failureTtlMs) throw new Error(cached.error);
     }
-    if (!this.inFlight) {
-      const path = this.configPath as string;
-      this.inFlight = this.load(path).finally(() => { this.inFlight = undefined; });
+    // A fresh lookup must see Bridge as it is now, so it never joins a read
+    // that started earlier; later ordinary lookups share the fresh one.
+    if (!this.inFlight || fresh) {
+      const load = this.load(this.configPath as string);
+      const shared = load.finally(() => { if (this.inFlight === shared) this.inFlight = undefined; });
+      this.inFlight = shared;
     }
     return this.inFlight;
   }

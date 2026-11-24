@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { resolveSenderAddress, withSenderAddressHints, SENDER_TOOLS } from "./sender.js";
+import { resolveSenderAddress, senderPattern, withSenderAddressHints, SENDER_TOOLS } from "./sender.js";
 import * as sending from "./sending.js";
 import * as drafts from "./drafts.js";
 import type { ToolCallContext, ToolDef, ToolResult } from "./types.js";
@@ -55,24 +55,35 @@ describe("resolveSenderAddress", () => {
 describe("withSenderAddressHints", () => {
   const defs: ToolDef[] = [...sending.defs, ...drafts.defs];
 
-  it("adds the addresses as an enum to every sender tool", () => {
+  it("adds the addresses as examples and a pattern to every sender tool", () => {
     const out = withSenderAddressHints(defs, ADDRESSES, { login: "me@proton.me", enumerate: true });
     const withFrom = out.filter(d => (d.inputSchema as { properties: Record<string, unknown> }).properties.from);
     expect(withFrom.map(d => d.name).sort()).toEqual([...SENDER_TOOLS].sort());
     for (const def of withFrom) {
-      const from = (def.inputSchema as { properties: { from: { enum?: string[]; description: string } } }).properties.from;
-      expect(from.enum).toEqual(ADDRESSES);
+      const from = (def.inputSchema as { properties: { from: { examples?: string[]; pattern?: string; description: string } } }).properties.from;
+      expect(from.examples).toEqual(ADDRESSES);
+      expect(from.pattern).toBe(senderPattern(ADDRESSES));
       expect(from.description).toContain("work@example.com");
     }
     // Other tools and the original definitions are untouched.
     expect(out.find(d => d.name === "send_test_email")).toBe(defs.find(d => d.name === "send_test_email"));
-    expect((defs[0].inputSchema as { properties: { from: { enum?: unknown } } }).properties.from.enum).toBeUndefined();
+    expect((defs[0].inputSchema as { properties: { from: { pattern?: unknown } } }).properties.from.pattern).toBeUndefined();
+  });
+
+  it("builds a Unicode-safe pattern that accepts exactly the forms the server accepts", () => {
+    const re = new RegExp(senderPattern(["me@proton.me", "first.last-x@my-domain.example"]), "u");
+    for (const ok of ["me@proton.me", "ME@Proton.Me", "me+news@proton.me", "First.Last-X+a.b@My-Domain.example"]) {
+      expect(re.test(ok)).toBe(true);
+    }
+    for (const bad of ["ceo@proton.me", "me@proton.mee", "mex@proton.me", "firstxlast-x@my-domain.example", "me+a@b@proton.me"]) {
+      expect(re.test(bad)).toBe(false);
+    }
   });
 
   it("describes without an enum for multi-account setups and always includes the login", () => {
     const out = withSenderAddressHints(defs, ["work@example.com"], { login: "me@proton.me", enumerate: false, accountLabel: "personal" });
-    const from = (out.find(d => d.name === "send_email")!.inputSchema as { properties: { from: { enum?: string[]; description: string } } }).properties.from;
-    expect(from.enum).toBeUndefined();
+    const from = (out.find(d => d.name === "send_email")!.inputSchema as { properties: { from: { pattern?: string; description: string } } }).properties.from;
+    expect(from.pattern).toBeUndefined();
     expect(from.description).toContain("me@proton.me, work@example.com");
     expect(from.description).toContain("account personal");
   });
@@ -104,7 +115,7 @@ describe("sending tools with Bridge's address list", () => {
       getCallerAllowedFolders: () => undefined,
       imapService: {
         getEmailById: async () => ({
-          id: "42", from: "Alice <alice@x.com>", to: ["alias@example.com", "bob@x.com"], cc: ["ME@proton.me"],
+          id: "42", from: "Alice <alice@x.com>", to: ["alias+news@example.com", "bob@x.com"], cc: ["ME@proton.me"],
           subject: "Hello", body: "", isHtml: false, date: new Date(), folder: "INBOX",
           isRead: true, isStarred: false, hasAttachment: false,
         }),

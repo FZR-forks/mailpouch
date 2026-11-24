@@ -14,14 +14,20 @@ addresses:
 ```json
 "from": {
   "type": "string",
-  "enum": ["me@proton.me", "me@pm.me", "hello@example.com"],
+  "examples": ["me@proton.me", "me@pm.me", "hello@example.com"],
+  "pattern": "^(?:[mM][eE](?:\\+[^@\\s]*)?@[pP][rR][oO]...)$",
   "description": "Sender address (optional). This Proton account can send from: me@proton.me, me@pm.me, hello@example.com. Omit to send from me@proton.me. Any other address is rejected."
 }
 ```
 
-- With one configured account the list is an `enum`. With several accounts it
-  is in the description only and names the active account, because a call
-  routed with `account_id` belongs to another account.
+- With one configured account the addresses are `examples`, and a `pattern`
+  accepts only them, in any letter case and with an optional `+tag`, the same
+  forms Bridge accepts. With several accounts they are in the description only
+  and name the active account, because a call routed with `account_id` belongs
+  to another account.
+- The addresses are listed only for an agent whose grant (and global preset)
+  allows a sending tool on the active account. Others, including agents still
+  waiting for approval, get the plain schema.
 - A `from` outside the list is refused before anything is sent, with the valid
   addresses in the error. MailPouch first re-reads Bridge's list, so an address
   you added in Proton a moment ago is accepted. `name+tag@domain` counts as
@@ -81,4 +87,8 @@ MailPouch pins the certificate from the file.
   decoding it, and never logs the token. In Docker the token and socket are
   readable by MailPouch's user only.
 - MailPouch never opens Bridge's event stream: Bridge stops when a client of
-  that stream disconnects.
+  that stream disconnects, and stopping the stream on purpose can crash it.
+  Without a stream, Bridge keeps the GUI notifications it would have sent
+  (user, sync-progress and used-space changes, not one per message) in memory
+  until it restarts. It grows slowly (a small record per event) and is cleared
+  on every Bridge or container restart.

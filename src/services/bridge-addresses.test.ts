@@ -246,6 +246,22 @@ describe("BridgeSenderDirectory", () => {
     expect(await missing.lookup("me@proton.me")).toMatchObject({ available: false, reason: expect.stringContaining("--grpc") });
   });
 
+  it("never lets a fresh lookup reuse a read that started before it", async () => {
+    let calls = 0;
+    const releases: Array<(users: BridgeUser[]) => void> = [];
+    const dir = directory(() => { calls++; return new Promise(r => releases.push(r)); });
+    const stale = dir.lookup("me@proton.me");
+    const fresh = dir.lookup("new@proton.me", { fresh: true });
+    const joinsFresh = dir.lookup("new@proton.me");
+    expect(calls).toBe(2);
+    releases[0]([me]);
+    releases[1]([{ ...me, addresses: [...me.addresses, "new@proton.me"] }]);
+    expect((await stale).available).toBe(true);
+    expect(await fresh).toMatchObject({ available: true, addresses: expect.arrayContaining(["new@proton.me"]) });
+    expect(await joinsFresh).toMatchObject({ available: true });
+    expect(calls).toBe(2);
+  });
+
   it("shares one in-flight request between concurrent lookups", async () => {
     let calls = 0;
     const dir = directory(async () => { calls++; await new Promise(r => setTimeout(r, 10)); return [me]; });

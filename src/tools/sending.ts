@@ -12,6 +12,7 @@ import { logger } from "../utils/logger.js";
 import { escapeHtml } from "../services/smtp-service.js";
 import type { ToolDef, ToolHandler } from "./types.js";
 import { FROM_SCHEMA_FIELD, ownAddresses, resolveSenderAddress } from "./sender.js";
+import { senderAddressKey } from "../services/bridge-addresses.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -263,15 +264,16 @@ export const handlers: Record<string, ToolHandler> = {
 
     const ccAddresses: string[] = [];
     if (args.replyAll) {
+      // Compare like Bridge does: any case, `+tag` forms count as the address.
       const selfAddresses = new Set([
         config.smtp.username,
         from ?? config.smtp.username,
         ...await ownAddresses(ctx),
-      ].map(a => a.toLowerCase()));
+      ].map(senderAddressKey));
       const addrs = [...(original.to ?? []), ...(original.cc ?? [])];
       for (const a of addrs) {
         const addr = (a.match(/<([^>]+)>/)?.[1] ?? a).trim().toLowerCase();
-        if (addr && !selfAddresses.has(addr) && addr !== replyToAddress.toLowerCase()) {
+        if (addr && !selfAddresses.has(senderAddressKey(addr)) && addr !== replyToAddress.toLowerCase()) {
           if (isValidEmail(addr)) ccAddresses.push(addr);
         }
       }

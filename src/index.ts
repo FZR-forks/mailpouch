@@ -947,14 +947,41 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 /**
+ * Whether this session's caller could use a sending tool on the account, so
+ * its addresses are only shown to agents allowed to send from it. Read-only:
+ * no pending grant is created and no rate slot is reserved.
+ */
+function callerMaySendFrom(accountId: string): boolean {
+  const senderTools = ["send_email", "reply_to_email", "forward_email", "schedule_email"] as const;
+  // Read the enabled flags directly: permissions.check() would spend rate slots.
+  const cfg = loadConfig() ?? defaultConfig();
+  if (!senderTools.some(tool => cfg.permissions.tools?.[tool]?.enabled === true)) return false;
+  let clientId: string | undefined;
+  let callerIp: string | undefined;
+  const remote = currentCaller();
+  if (remote) { clientId = remote.clientId; callerIp = remote.ip; }
+  else if (localAgentsGated()) clientId = localAgentId(server.getClientVersion()?.name || "(unnamed local client)");
+  if (!clientId) return true; // trusted local caller with no grant gate
+  let identity: string;
+  try { identity = accountManager.identityForAccount(accountId); } catch { return false; }
+  const snapshot = grantManager.getAuthorizationSnapshot(clientId);
+  const globalPreset = cfg.permissions.preset;
+  return senderTools.some(tool => grantManager.check({
+    clientId, tool, args: {}, callerIp,
+    targetAccountId: accountId, targetAccountIdentity: identity, globalPreset,
+  }, { reserveHourlyToolSlot: false, snapshot }).allowed);
+}
+
+/**
  * Put the active account's real sender addresses on the `from` field of the
  * sending tools, so agents pick one instead of inventing an address. With a
- * single account the list is an enum; with several it is descriptive only,
+ * single account a schema pattern accepts only them; with several it is descriptive only,
  * because an `account_id`-routed call has another account's addresses.
  */
 async function withActiveSenderAddresses(defs: ToolDef[]): Promise<ToolDef[]> {
   let active: AccountSpec;
   try { active = accountManager.getActive().spec; } catch { return defs; }
+  if (!callerMaySendFrom(active.id)) return defs;
   const lookup = await senderAddressesFor(active);
   if (!lookup.available) return defs;
   const multiAccount = accountManager.list().length > 1;
