@@ -499,17 +499,12 @@ export class OAuthHandlers {
     }
     catch (hookErr) { logger.warn("onAuthorizationCodeExchanged hook threw (non-fatal)", "OAuth", hookErr); }
 
-    const issued = this.store.issueToken({
+    // A refresh token lets the host renew silently when the access token
+    // lapses, instead of asking the user to reconnect every 24 h.
+    const { access: issued, refreshToken } = this.store.issueTokenPair({
       clientId: auth.clientId,
       scopes: auth.scopes,
       resource: auth.resource ?? resource,
-    });
-    // A refresh token lets the host renew silently when the access token
-    // lapses, instead of asking the user to reconnect every 24 h.
-    const refreshToken = this.store.issueRefreshToken({
-      clientId: issued.clientId,
-      scopes: issued.scopes,
-      resource: issued.resource,
     });
 
     json(res, 200, {

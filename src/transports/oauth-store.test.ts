@@ -307,6 +307,36 @@ describe("OAuthStore", () => {
       expect(store.rotateRefreshToken(rt)).toBeNull();
     });
 
+    it("keeps the full retry grace when rotation happens just before expiry", () => {
+      vi.useFakeTimers();
+      const rt = store.issueRefreshToken(args);
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_TOKEN_TTL_MS - 1000);
+      expect(store.rotateRefreshToken(rt)).not.toBeNull();
+      vi.setSystemTime(Date.now() + 2000); // past the original expiry, inside the grace
+      expect(store.rotateRefreshToken(rt)).not.toBeNull();
+    });
+
+    it("still rejects an expired token that was never rotated", () => {
+      vi.useFakeTimers();
+      const rt = store.issueRefreshToken(args);
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_TOKEN_TTL_MS + 1000);
+      expect(store.rotateRefreshToken(rt)).toBeNull();
+    });
+
+    it("revokes the whole family when a rotated token is reused after the grace", () => {
+      vi.useFakeTimers();
+      const stolen = store.issueRefreshToken(args);
+      const thief = store.rotateRefreshToken(stolen)!;           // redeemed first
+      const other = store.issueTokenPair(args);                    // separate sign-in
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_ROTATION_GRACE_MS + 1000);
+      expect(store.rotateRefreshToken(stolen)).toBeNull();         // legitimate client's late reuse
+      expect(store.rotateRefreshToken(thief.refreshToken)).toBeNull();
+      expect(store.verifyToken(thief.access.token)).toBeNull();
+      // An unrelated family of the same client keeps working.
+      expect(store.verifyToken(other.access.token)).not.toBeNull();
+      expect(store.rotateRefreshToken(other.refreshToken)).not.toBeNull();
+    });
+
     it("expires after the idle TTL, and each rotation slides the window", () => {
       vi.useFakeTimers();
       const rt = store.issueRefreshToken(args);
@@ -353,6 +383,18 @@ describe("OAuthStore", () => {
         const b = new OAuthStore(path);
         expect(b.getClient(legacy.client_id)).toBeDefined();
         expect(b.getClient(modern.client_id)).toBeDefined();
+      });
+
+      it("detects reuse of a rotated token across a restart", () => {
+        vi.useFakeTimers();
+        const a = new OAuthStore(path);
+        const rt = a.issueRefreshToken(args);
+        const next = a.rotateRefreshToken(rt)!;
+        vi.setSystemTime(Date.now() + OAUTH_REFRESH_ROTATION_GRACE_MS + 1000);
+        const b = new OAuthStore(path);
+        expect(b.rotateRefreshToken(rt)).toBeNull();
+        expect(b.rotateRefreshToken(next.refreshToken)).toBeNull();
+        expect(b.verifyToken(next.access.token)).toBeNull();
       });
 
       it("loads a version-2 file without refresh tokens", () => {

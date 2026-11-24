@@ -19,6 +19,7 @@
 
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
+import { logger } from "../utils/logger.js";
 
 export interface RegisteredClient {
   client_id: string;
@@ -53,6 +54,8 @@ export interface IssuedToken {
   resource?: string;
   /** ms since epoch. */
   expiresAt: number;
+  /** Refresh-token family this access token was issued from, if any. */
+  familyId?: string;
 }
 
 /** A refresh token's record. Keyed by sha256(refresh token); the raw value is
@@ -65,6 +68,10 @@ export interface RefreshTokenRecord {
   expiresAt: number;
   /** ms since epoch the token was exchanged for a successor (rotation). */
   rotatedAt?: number;
+  /** Shared by every token rotated from one sign-in. Reusing a rotated token
+   *  after its grace revokes the whole family (RFC 9700 §2.2.2 replay
+   *  detection). Records persisted without one form a family of one. */
+  familyId?: string;
 }
 
 export const OAUTH_CODE_TTL_MS = 60_000;                // RFC 6749 §4.1.2: MAX 10 min; we go short
@@ -154,7 +161,8 @@ export class OAuthStore {
       && Array.isArray(r.scopes) && r.scopes.every(x => typeof x === "string")
       && (r.resource === undefined || typeof r.resource === "string")
       && typeof r.expiresAt === "number" && Number.isFinite(r.expiresAt)
-      && (r.rotatedAt === undefined || (typeof r.rotatedAt === "number" && Number.isFinite(r.rotatedAt)));
+      && (r.rotatedAt === undefined || (typeof r.rotatedAt === "number" && Number.isFinite(r.rotatedAt)))
+      && (r.familyId === undefined || typeof r.familyId === "string");
   }
 
   private load(): void {
@@ -184,7 +192,7 @@ export class OAuthStore {
       if (Array.isArray(raw.refreshTokens)) {
         for (const entry of raw.refreshTokens) {
           if (!entry || typeof entry.h !== "string" || !/^[0-9a-f]{64}$/.test(entry.h)) continue;
-          if (!OAuthStore.isRefreshRecord(entry.r) || this.refreshIsDead(entry.r, now)) continue;
+          if (!OAuthStore.isRefreshRecord(entry.r) || this.refreshIsPrunable(entry.r, now)) continue;
           if (this.refreshTokens.size >= OAUTH_MAX_REFRESH_TOKENS) this.evictOldest(this.refreshTokens);
           this.refreshTokens.set(entry.h, entry.r);
         }
@@ -289,7 +297,7 @@ export class OAuthStore {
     return rec;
   }
 
-  issueToken(args: { clientId: string; scopes: string[]; resource?: string }): IssuedToken {
+  issueToken(args: { clientId: string; scopes: string[]; resource?: string; familyId?: string }): IssuedToken {
     const token = randomBytes(32).toString("base64url");
     const rec: IssuedToken = {
       token,
@@ -297,6 +305,7 @@ export class OAuthStore {
       scopes: args.scopes,
       resource: args.resource,
       expiresAt: Date.now() + OAUTH_ACCESS_TOKEN_TTL_MS,
+      ...(args.familyId ? { familyId: args.familyId } : {}),
     };
     if (this.tokens.size >= OAUTH_MAX_TOKENS) {
       const first = this.tokens.keys().next();
@@ -356,20 +365,33 @@ export class OAuthStore {
     return n;
   }
 
-  /** True when a refresh record can no longer be redeemed. */
+  /** True when a refresh record can no longer be redeemed. A rotated token
+   *  stays redeemable for the full grace even if its own expiry passes in
+   *  between, so a retry right after a late rotation still succeeds. */
   private refreshIsDead(rec: RefreshTokenRecord, now: number): boolean {
-    if (now > rec.expiresAt) return true;
-    return rec.rotatedAt !== undefined && now - rec.rotatedAt > OAUTH_REFRESH_ROTATION_GRACE_MS;
+    if (rec.rotatedAt !== undefined) return now - rec.rotatedAt > OAUTH_REFRESH_ROTATION_GRACE_MS;
+    return now > rec.expiresAt;
   }
 
-  /** Mint a refresh token for a client. Returns the raw token (shown once). */
-  issueRefreshToken(args: { clientId: string; scopes: string[]; resource?: string }): string {
+  /** True once a record is useless even as a replay tombstone: a rotated
+   *  record is kept until its original expiry so reuse can still be detected. */
+  private refreshIsPrunable(rec: RefreshTokenRecord, now: number): boolean {
+    const until = rec.rotatedAt === undefined
+      ? rec.expiresAt
+      : Math.max(rec.expiresAt, rec.rotatedAt + OAUTH_REFRESH_ROTATION_GRACE_MS);
+    return now > until;
+  }
+
+  /** Mint a refresh token for a client. Returns the raw token (shown once).
+   *  Without a familyId it starts a new family (a fresh sign-in). */
+  issueRefreshToken(args: { clientId: string; scopes: string[]; resource?: string; familyId?: string }): string {
     const token = randomBytes(32).toString("base64url");
     const rec: RefreshTokenRecord = {
       clientId: args.clientId,
       scopes: [...args.scopes],
       ...(args.resource ? { resource: args.resource } : {}),
       expiresAt: Date.now() + OAUTH_REFRESH_TOKEN_TTL_MS,
+      familyId: args.familyId ?? randomUUID(),
     };
     if (this.refreshTokens.size >= OAUTH_MAX_REFRESH_TOKENS) this.evictOldest(this.refreshTokens);
     this.refreshTokens.set(OAuthStore.hashToken(token), rec);
@@ -377,34 +399,71 @@ export class OAuthStore {
     return token;
   }
 
-  /** Look up a live refresh token without consuming it. */
+  /** Access token + refresh token for a fresh sign-in, in one new family. */
+  issueTokenPair(args: { clientId: string; scopes: string[]; resource?: string }): { access: IssuedToken; refreshToken: string } {
+    const familyId = randomUUID();
+    const access = this.issueToken({ ...args, familyId });
+    const refreshToken = this.issueRefreshToken({ ...args, familyId });
+    return { access, refreshToken };
+  }
+
+  /** Revoke every refresh token in a family and the access tokens it issued. */
+  private revokeFamily(familyId: string): number {
+    let n = 0;
+    for (const [h, r] of this.refreshTokens) {
+      if (r.familyId === familyId) { this.refreshTokens.delete(h); n++; }
+    }
+    for (const [h, t] of this.tokens) {
+      if (t.familyId === familyId) {
+        this.tokens.delete(h);
+        this.unindexToken(h, t.clientId);
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Look up a redeemable refresh token without consuming it. A rotated token
+   * presented after its grace means two parties hold the family (a stolen
+   * token was redeemed first, or the client replayed an old one): the whole
+   * family and its access tokens are revoked and the caller must sign in again.
+   */
   peekRefreshToken(token: string): RefreshTokenRecord | null {
     if (!token) return null;
     const hash = OAuthStore.hashToken(token);
     const rec = this.refreshTokens.get(hash);
     if (!rec) return null;
-    if (this.refreshIsDead(rec, Date.now())) {
+    const now = Date.now();
+    if (!this.refreshIsDead(rec, now)) return rec;
+    if (rec.rotatedAt !== undefined) {
+      if (rec.familyId) this.revokeFamily(rec.familyId);
       this.refreshTokens.delete(hash);
-      this.persist();
-      return null;
+      logger.warn(`Rotated OAuth refresh token reused after its grace; revoked its token family for client ${rec.clientId}`, "OAuth");
+    } else {
+      this.refreshTokens.delete(hash);
     }
-    return rec;
+    this.persist();
+    return null;
   }
 
   /**
    * Redeem a refresh token: mark it rotated (it keeps working for
    * OAUTH_REFRESH_ROTATION_GRACE_MS so a retried request still succeeds) and
-   * return a successor refresh token plus a new access token, both bound to
-   * the original client, scopes and resource. Null when the token is unknown,
-   * expired, past its rotation grace, or belongs to another client.
+   * return a successor refresh token plus a new access token in the same
+   * family, both bound to the original client, scopes and resource. Null when
+   * the token is unknown, expired, past its rotation grace, or belongs to
+   * another client.
    */
   rotateRefreshToken(token: string, clientId?: string): { access: IssuedToken; refreshToken: string } | null {
     const rec = this.peekRefreshToken(token);
     if (!rec) return null;
     if (clientId && clientId !== rec.clientId) return null;
     if (rec.rotatedAt === undefined) rec.rotatedAt = Date.now();
-    const refreshToken = this.issueRefreshToken(rec);
-    const access = this.issueToken({ clientId: rec.clientId, scopes: rec.scopes, resource: rec.resource });
+    if (!rec.familyId) rec.familyId = randomUUID();
+    const args = { clientId: rec.clientId, scopes: rec.scopes, resource: rec.resource, familyId: rec.familyId };
+    const refreshToken = this.issueRefreshToken(args);
+    const access = this.issueToken(args);
     return { access, refreshToken };
   }
 
@@ -430,7 +489,7 @@ export class OAuthStore {
     }
     let refresh = 0;
     for (const [k, v] of this.refreshTokens) {
-      if (this.refreshIsDead(v, now)) { this.refreshTokens.delete(k); refresh++; }
+      if (this.refreshIsPrunable(v, now)) { this.refreshTokens.delete(k); refresh++; }
     }
     if (tokens > 0 || refresh > 0) this.persist();
     return { codes, tokens };
