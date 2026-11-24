@@ -402,6 +402,7 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI â
 | `MAILPOUCH_MACHINE_SECRET` | derived from host | Override the machine-binding secret used to encrypt at-rest credentials |
 | `MAILPOUCH_FORCE_STDIO` | unset | Force stdio for this spawn even if the config has `remoteMode: true`. Set on a stdio MCP-client entry (e.g. Claude Code) so it speaks stdio instead of starting the HTTP server. |
 | `MAILPOUCH_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
+| `MAILPOUCH_BRIDGE_GRPC_CONFIG` | Bridge's config dir | Path to Bridge's `grpcServerConfig.json`, used to read the account's sender addresses; `off` disables it. See [sender addresses](docs/sender-addresses.md) |
 | `MAILPOUCH_TIER` | `complete` | Tool-tier override: `core` (30 tools), `extended` (80), or `complete` (up to 86, depending on optional integrations) |
 | `PORT` | `8766` | Override settings UI HTTP server port |
 
@@ -746,6 +747,14 @@ MIT â€” see [LICENSE](LICENSE)
 `compose.yaml` runs MailPouch and a headless Proton Bridge on a server, with
 Bridge reachable only by MailPouch. Bridge's login works with two-factor
 authentication. See [docs/docker.md](docs/docker.md).
+
+### Sender addresses from Proton
+
+The `from` field of `send_email`, `reply_to_email`, `forward_email`, and
+`schedule_email` lists the Proton account's real sender addresses, read from
+Proton Bridge itself, and an address the account does not have is refused
+before sending. This works automatically with the Bridge desktop app and with
+`compose.yaml`. See [docs/sender-addresses.md](docs/sender-addresses.md).
 
 ### Restrict agents to an AI label
 

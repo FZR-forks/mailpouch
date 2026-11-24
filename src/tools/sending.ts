@@ -11,6 +11,7 @@ import { isValidEmail, optionalFolderHint, validateAttachments, sanitizeAttachme
 import { logger } from "../utils/logger.js";
 import { escapeHtml } from "../services/smtp-service.js";
 import type { ToolDef, ToolHandler } from "./types.js";
+import { FROM_SCHEMA_FIELD, ownAddresses, resolveSenderAddress } from "./sender.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -80,7 +81,7 @@ export const defs: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
+        from: FROM_SCHEMA_FIELD,
         to: { type: "string", description: "Recipient address(es), comma-separated" },
         cc: { type: "string", description: "CC addresses, comma-separated" },
         bcc: { type: "string", description: "BCC addresses, comma-separated" },
@@ -111,7 +112,7 @@ export const defs: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
+        from: FROM_SCHEMA_FIELD,
         emailId: { type: "string", description: "UID of the email to reply to" },
         folder: { type: "string", description: "Folder the original message lives in. Providing this avoids UID collisions across folders." },
         body: { type: "string", description: "Reply body (plain text or HTML)" },
@@ -137,7 +138,7 @@ export const defs: ToolDef[] = [
       properties: {
         emailId: { type: "string", description: "UID of the email to forward" },
         folder: { type: "string", description: "Folder the original message lives in. Providing this avoids UID collisions across folders." },
-        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
+        from: FROM_SCHEMA_FIELD,
         to: { type: "string", description: "Recipient address(es), comma-separated" },
         message: { type: "string", description: "Optional message to prepend before the forwarded content" },
       },
@@ -162,15 +163,6 @@ export const defs: ToolDef[] = [
     outputSchema: ACTION_RESULT_SCHEMA,
   },
 ];
-
-/** Validate an optional account-owned sender before composing outbound mail. */
-function senderAddress(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || !isValidEmail(value)) {
-    throw new McpError(ErrorCode.InvalidParams, "'from' must be a valid email address.");
-  }
-  return value;
-}
 
 export const handlers: Record<string, ToolHandler> = {
   send_email: async (ctx) => {
@@ -211,8 +203,9 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.bcc !== undefined && typeof args.bcc !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
     }
+    const from = await resolveSenderAddress(ctx);
     const result = await smtpService.sendEmail({
-      from: senderAddress(args.from),
+      from,
       accessLabel: ctx.mailAccessLabel,
       to: args.to as string,
       cc: args.cc as string | undefined,
@@ -249,6 +242,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.replyAll !== undefined && typeof args.replyAll !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'replyAll' must be a boolean when provided.");
     }
+    const from = await resolveSenderAddress(ctx);
     const original = await imapService.getEmailById(emailId, sourceFolder);
     if (!original) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
@@ -270,9 +264,10 @@ export const handlers: Record<string, ToolHandler> = {
     const ccAddresses: string[] = [];
     if (args.replyAll) {
       const selfAddresses = new Set([
-        config.smtp.username.toLowerCase(),
-        (senderAddress(args.from) ?? config.smtp.username).toLowerCase(),
-      ]);
+        config.smtp.username,
+        from ?? config.smtp.username,
+        ...await ownAddresses(ctx),
+      ].map(a => a.toLowerCase()));
       const addrs = [...(original.to ?? []), ...(original.cc ?? [])];
       for (const a of addrs) {
         const addr = (a.match(/<([^>]+)>/)?.[1] ?? a).trim().toLowerCase();
@@ -283,7 +278,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
 
     const result = await smtpService.sendEmail({
-      from: senderAddress(args.from),
+      from,
       accessLabel: ctx.mailAccessLabel,
       to: replyToAddress,
       cc: ccAddresses.length > 0 ? ccAddresses.join(", ") : undefined,
@@ -317,6 +312,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
       throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
     }
+    const from = await resolveSenderAddress(ctx);
     const fwdOriginal = await imapService.getEmailById(fwdId, sourceFolder);
     if (!fwdOriginal) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
@@ -358,7 +354,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
 
     const fwdResult = await smtpService.sendEmail({
-      from: senderAddress(args.from),
+      from,
       accessLabel: ctx.mailAccessLabel,
       to: args.to as string,
       subject: fwdSubject,

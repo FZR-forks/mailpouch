@@ -159,11 +159,14 @@ function confirmGateFallbackResponse(name: string, preview: string): {
 import { sanitizeText } from "./settings/security.js";
 import { tracer } from "./utils/tracer.js";
 import { allToolDefs, advertisedToolDefs, allHandlers, escalationHandlers, describeRequestEscalation } from "./tools/registry.js";
-import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
+import type { ToolCallContext, ToolDef, ToolSharedState } from "./tools/types.js";
+import type { AccountSpec } from "./accounts/types.js";
 import { gatherSetupStatus } from "./diagnostics/setup-status.js";
 import { shouldSurfaceGrantToast, shouldSurfaceActionToast } from "./notifications/security-gate.js";
 import { resolveInvocation, USAGE } from "./cli/invocation.js";
 import { AccountRuntimeRegistry } from "./runtime/account-runtime.js";
+import { BridgeSenderDirectory, type SenderAddressLookup } from "./services/bridge-addresses.js";
+import { withSenderAddressHints } from "./tools/sender.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
 // All credentials and connection settings are loaded from ~/.mailpouch.json
@@ -197,6 +200,17 @@ const config: ProtonMailConfig = {
 // Per-tool routing to a non-active account happens in the dispatcher via a
 // local shadow of these names.
 const accountManager = new AccountManager();
+// Sender addresses come from Proton Bridge's own gRPC service (Bridge started
+// with --grpc); see services/bridge-addresses.ts.
+const bridgeSenders = new BridgeSenderDirectory();
+
+/** Bridge-reported sender addresses for one account; never throws. */
+function senderAddressesFor(spec: AccountSpec, opts?: { fresh?: boolean }): Promise<SenderAddressLookup> {
+  if (spec.providerType !== "proton-bridge") {
+    return Promise.resolve({ available: false, reason: "not a Proton Bridge account" });
+  }
+  return bridgeSenders.lookup(spec.username, opts);
+}
 registerAccountManager(accountManager);
 let imapService: SimpleIMAPService = accountManager.getActive().imap;
 let smtpService: SMTPService = accountManager.getActive().smtp;
@@ -928,8 +942,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   // label-scoped form are not advertised, exactly as if they did not exist.
   let labelPolicyOn: boolean;
   try { labelPolicyOn = currentAccessLabelFolder() !== undefined; } catch { labelPolicyOn = true; }
-  return { tools: defs.filter(t => visible.has(t.name) && (!labelPolicyOn || labelToolVisible(t.name))) };
+  const listed = defs.filter(t => visible.has(t.name) && (!labelPolicyOn || labelToolVisible(t.name)));
+  return { tools: await withActiveSenderAddresses(listed) };
 });
+
+/**
+ * Put the active account's real sender addresses on the `from` field of the
+ * sending tools, so agents pick one instead of inventing an address. With a
+ * single account the list is an enum; with several it is descriptive only,
+ * because an `account_id`-routed call has another account's addresses.
+ */
+async function withActiveSenderAddresses(defs: ToolDef[]): Promise<ToolDef[]> {
+  let active: AccountSpec;
+  try { active = accountManager.getActive().spec; } catch { return defs; }
+  const lookup = await senderAddressesFor(active);
+  if (!lookup.available) return defs;
+  const multiAccount = accountManager.list().length > 1;
+  return withSenderAddressHints(defs, lookup.addresses, {
+    login: active.username,
+    enumerate: !multiAccount,
+    accountLabel: multiAccount ? active.id : undefined,
+  });
+}
 
 // ─── Tool Handlers ────────────────────────────────────────────────────────────
 // The CallTool request handler resolves the account routing, runs the
@@ -1361,6 +1395,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         return labelAllowedFolders(aiLabelFolder, authorizedGrant ? grantManager.resolveAllowedFolders(authorizedGrant) : undefined);
       },
       config: configForAccount(routedAccountServices),
+      senderAddresses: (opts) => senderAddressesFor(routedAccountServices.spec, opts),
       smtpStatus: accountRuntime.getSmtpStatus(requestedAccountId),
       setSmtpStatus: (status) => {
         accountRuntime.setSmtpStatus(requestedAccountId, status);

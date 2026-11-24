@@ -50,6 +50,7 @@ import type { PassService } from "../services/pass-service.js";
 import type { FtsIndexService, FtsRecord } from "../services/fts-service.js";
 import type { AccountSmtpStatus } from "../runtime/account-runtime.js";
 import type { ProtonMailConfig, EmailMessage } from "../types/index.js";
+import type { SenderAddressLookup } from "../services/bridge-addresses.js";
 
 export interface ToolDef {
   name: string;
@@ -92,6 +93,12 @@ export interface ToolCallContext {
    * are listed or changed. Internal routing only; never shown to the agent.
    */
   mailAccessLabel?: string;
+  /**
+   * Sender addresses of this call's account, read from Proton Bridge's gRPC
+   * service. Absent when the dispatcher does not provide it (tests); returns
+   * `available: false` when Bridge's list cannot be read. `fresh` skips the cache.
+   */
+  senderAddresses?: (opts?: { fresh?: boolean }) => Promise<SenderAddressLookup>;
   /** Record SMTP-confirmed delivery before any follow-up IMAP work; never call for an ambiguous or failed send. */
   recordMailDelivery?: (messageId?: string) => void;
 

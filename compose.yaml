@@ -11,11 +11,17 @@ services:
     # https://github.com/dancwilliams/protonmail-bridge-docker
     image: ghcr.io/dancwilliams/protonmail-bridge-docker:v3.27.1-11@sha256:04b73398443c6e14610ffb257ca01e69c2ef3c0926aa6a0abd5ef64cef07d85f
     restart: unless-stopped
+    # Runs Bridge with its gRPC service on so MailPouch can read the Proton
+    # account's sender addresses; `init` and IMAP/SMTP work as before.
+    entrypoint: ["bash", "/mailpouch/bridge-grpc.sh"]
     environment:
       # Optional: encrypt Bridge's keychain at rest (set it before `init`).
       KEYRING_PASSPHRASE: ${KEYRING_PASSPHRASE:-}
     volumes:
       - bridge:/root
+      - ./docker/bridge-grpc.sh:/mailpouch/bridge-grpc.sh:ro
+      # Bridge's gRPC socket and token, shared with MailPouch only.
+      - bridge-grpc:/run/mailpouch-bridge
     networks:
       - bridge
 
@@ -42,6 +48,7 @@ services:
       MAILPOUCH_AUTO_APPROVE_AGENTS: ${MAILPOUCH_AUTO_APPROVE_AGENTS:-}
     volumes:
       - mailpouch:/data
+      - bridge-grpc:/run/mailpouch-bridge:ro
     ports:
       - "${MAILPOUCH_BIND:-127.0.0.1}:8788:8788"
     networks:
@@ -52,4 +59,5 @@ networks:
 
 volumes:
   bridge: {}
+  bridge-grpc: {}
   mailpouch: {}
