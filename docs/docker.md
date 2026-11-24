@@ -104,6 +104,13 @@ Whichever mode you use, a known client that signs in again after its approval
 request expired gets a new request (or, with auto-approve, access) instead of
 being rejected on every call.
 
+Interactive apps stay connected on their own. Each sign-in returns a 24-hour
+access token and a refresh token; the app trades the refresh token for a new
+pair when the access token lapses, with no reconnect. A refresh token expires
+after 90 days without use, and `mailpouch agent revoke` invalidates it
+immediately. Apps connected before refresh-token support have none, so
+reconnect them once after upgrading.
+
 ## Exposing MailPouch beyond the server
 
 The daemon speaks plain HTTP. Keep `MAILPOUCH_BIND=127.0.0.1` and either reach
@@ -138,8 +145,8 @@ apply. Previously persisted tokens also work across IP changes.
 
 ## OAuth registrations across restarts
 
-Public OAuth client registrations and token hashes persist in MailPouch's private
-data volume. ChatGPT can reuse its registered client ID after an upgrade or
+Public OAuth client registrations and access- and refresh-token hashes persist
+in MailPouch's private data volume. ChatGPT can reuse its registered client ID after an upgrade or
 restart. Authorization codes remain short-lived and process-local; retry login
 if a restart interrupts an in-progress exchange. Service-account credentials
 remain in their separate store.

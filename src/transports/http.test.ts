@@ -136,6 +136,47 @@ async function exchangeCodeForClient(url: string, clientId: string): Promise<str
   return token;
 }
 
+/** Full interactive sign-in, returning the refresh token the host would keep. */
+async function signInWithRefresh(url: string): Promise<{ clientId: string; token: string; refreshToken: string; grantTypes: string[] }> {
+  const redirectUri = "http://localhost:9999/cb";
+  const registered = await fetch(`${url}/oauth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ redirect_uris: [redirectUri], client_name: "refresh HTTP test" }),
+  });
+  const { client_id: clientId, grant_types: grantTypes } = await registered.json() as { client_id: string; grant_types: string[] };
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const authorize = await fetch(`${url}/oauth/authorize?${new URLSearchParams({
+    client_id: clientId, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: "S256",
+  }).toString()}`, { redirect: "manual" });
+  const code = new URL(authorize.headers.get("location") ?? redirectUri).searchParams.get("code") ?? "";
+  const tokenResponse = await fetch(`${url}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier }).toString(),
+  });
+  const body = await tokenResponse.json() as { access_token: string; refresh_token: string };
+  return { clientId, token: body.access_token, refreshToken: body.refresh_token, grantTypes };
+}
+
+async function refreshTokens(url: string, refreshToken: string, clientId?: string): Promise<{ status: number; body: { access_token?: string; refresh_token?: string; error?: string } }> {
+  const res = await fetch(`${url}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, ...(clientId ? { client_id: clientId } : {}) }).toString(),
+  });
+  return { status: res.status, body: await res.json() as { access_token?: string; refresh_token?: string; error?: string } };
+}
+
+async function revokeAtEndpoint(url: string, token: string): Promise<void> {
+  await fetch(`${url}/oauth/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token }).toString(),
+  });
+}
+
 function fakeReq(remote: string, headers: Record<string, string | undefined> = {}): IncomingMessage {
   return {
     socket: { remoteAddress: remote } as unknown,
@@ -608,6 +649,97 @@ describe("HTTP transport", () => {
     expect((await mcpInitialize(url, token)).status).toBe(401);
   });
 
+  describe("refresh tokens (silent renewal, no reconnect)", () => {
+    it("renews a lapsed session without user interaction", async () => {
+      const port = await freePort();
+      const grants = newGrantStore();
+      handle = await startHttpTransport({
+        server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, autoApproveAgents: true,
+      });
+      const url = `http://127.0.0.1:${port}`;
+      const signIn = await signInWithRefresh(url);
+      expect(signIn.grantTypes).toEqual(["authorization_code", "refresh_token"]);
+      expect(signIn.refreshToken).toBeTruthy();
+
+      // The access token is gone (expired or revoked), as after 24 h.
+      await revokeAtEndpoint(url, signIn.token);
+      expect((await mcpInitialize(url, signIn.token)).status).toBe(401);
+
+      const renewed = await refreshTokens(url, signIn.refreshToken, signIn.clientId);
+      expect(renewed.status).toBe(200);
+      expect(renewed.body.refresh_token).toBeTruthy();
+      expect(renewed.body.refresh_token).not.toBe(signIn.refreshToken);
+      expect((await mcpInitialize(url, renewed.body.access_token!)).status).toBeLessThan(400);
+
+      // And again from the successor.
+      const again = await refreshTokens(url, renewed.body.refresh_token!, signIn.clientId);
+      expect(again.status).toBe(200);
+    });
+
+    it("refreshes after a daemon restart", async () => {
+      const oauthTokensPath = join(tmpdir(), `mp-oauth-refresh-${randomBytes(6).toString("hex")}.json`);
+      saStorePaths.push(oauthTokensPath);
+      const grants = newGrantStore();
+      const firstPort = await freePort();
+      // Like production, the public issuer stays fixed across restarts.
+      const oauthIssuer = "https://mail.example";
+      handle = await startHttpTransport({ server: buildServer(), port: firstPort, host: "127.0.0.1", oauthEnabled: true, oauthIssuer, oauthTokensPath, agentGrants: grants, autoApproveAgents: true });
+      const signIn = await signInWithRefresh(`http://127.0.0.1:${firstPort}`);
+      await handle.close();
+      handle = null;
+      const secondPort = await freePort();
+      handle = await startHttpTransport({ server: buildServer(), port: secondPort, host: "127.0.0.1", oauthEnabled: true, oauthIssuer, oauthTokensPath, agentGrants: grants, autoApproveAgents: true });
+      const renewed = await refreshTokens(`http://127.0.0.1:${secondPort}`, signIn.refreshToken, signIn.clientId);
+      expect(renewed.status).toBe(200);
+      expect((await mcpInitialize(`http://127.0.0.1:${secondPort}`, renewed.body.access_token!)).status).toBeLessThan(400);
+    });
+
+    it("refuses to refresh a revoked client and drops its refresh token", async () => {
+      const port = await freePort();
+      const { grants, path } = newGrantStoreWithPath();
+      handle = await startHttpTransport({
+        server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, autoApproveAgents: true,
+      });
+      const url = `http://127.0.0.1:${port}`;
+      const signIn = await signInWithRefresh(url);
+      // Revoke from "another process": only the file changes.
+      new AgentGrantStore(path).revoke(signIn.clientId);
+      const refused = await refreshTokens(url, signIn.refreshToken, signIn.clientId);
+      expect(refused.status).toBe(400);
+      expect(refused.body.error).toBe("invalid_grant");
+    });
+
+    it("rejects a refresh token presented with another client_id, or an unknown one", async () => {
+      const port = await freePort();
+      handle = await startHttpTransport({
+        server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: newGrantStore(), autoApproveAgents: true,
+      });
+      const url = `http://127.0.0.1:${port}`;
+      const signIn = await signInWithRefresh(url);
+      expect((await refreshTokens(url, signIn.refreshToken, "pmc_00000000000000000000000000000000")).body.error).toBe("invalid_grant");
+      expect((await refreshTokens(url, "not-a-token", signIn.clientId)).body.error).toBe("invalid_grant");
+      // The legitimate client is unaffected by those attempts.
+      expect((await refreshTokens(url, signIn.refreshToken, signIn.clientId)).status).toBe(200);
+    });
+
+    it("asks the host to retry (503) while grant storage is unreadable, keeping the refresh token", async () => {
+      const port = await freePort();
+      const { grants, path } = newGrantStoreWithPath();
+      handle = await startHttpTransport({
+        server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, autoApproveAgents: true,
+      });
+      const url = `http://127.0.0.1:${port}`;
+      const signIn = await signInWithRefresh(url);
+      const good = JSON.parse(readFileSync(path, "utf-8"));
+      writeFileSync(path, "{ malformed", "utf-8");
+      const retry = await refreshTokens(url, signIn.refreshToken, signIn.clientId);
+      expect(retry.status).toBe(503);
+      expect(retry.body.error).toBe("temporarily_unavailable");
+      writeOwnerOnlyJsonAtomically(path, good);
+      expect((await refreshTokens(url, signIn.refreshToken, signIn.clientId)).status).toBe(200);
+    });
+  });
+
   it("preserves pending bearer behavior for the dispatcher to report approval status", async () => {
     const port = await freePort();
     const grants = newGrantStore();
@@ -706,6 +838,7 @@ describe("HTTP transport", () => {
       // the client_credentials flow needs.
       expect(body.grant_types_supported).toContain("authorization_code");
       expect(body.grant_types_supported).toContain("client_credentials");
+      expect(body.grant_types_supported).toContain("refresh_token");
       expect(body.token_endpoint_auth_methods_supported).toContain("client_secret_basic");
     });
 

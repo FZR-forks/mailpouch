@@ -8,7 +8,7 @@
  *   GET  /.well-known/oauth-protected-resource    — RFC 9728 metadata
  *   POST /oauth/register                          — RFC 7591 DCR
  *   GET  /oauth/authorize                         — auto-consent → 302 with code
- *   POST /oauth/token                             — code exchange (PKCE)
+ *   POST /oauth/token                             — code exchange (PKCE), refresh
  *   POST /oauth/revoke                            — token revocation
  *
  * Authorize is fully automatic (no admin password, no consent form): a valid
@@ -102,6 +102,9 @@ export function sanitizeDcrClientName(raw: string | undefined): string | undefin
     .slice(0, DCR_CLIENT_NAME_MAX);
   return cleaned || undefined;
 }
+
+/** Outcome of the transport's grant check before a refresh. */
+export type RefreshDecision = "ok" | "denied" | "unavailable";
 
 export interface OAuthEndpointsConfig {
   /** Externally-visible base URL of the server, e.g. https://mcp.example.com. */
@@ -219,6 +222,12 @@ export class OAuthHandlers {
    *  persisted client whose pending grant expired would otherwise get tokens
    *  that are rejected on every MCP call). Errors are logged and ignored. */
   private readonly onAuthorizationCodeExchanged?: (c: { client_id: string; client_name?: string; ip?: string }) => void;
+  /** Decides whether a refresh may mint a new access token for this client:
+   *  "ok" to proceed, "denied" when its grant is revoked/expired (the refresh
+   *  token is then dropped), "unavailable" when grant storage can't be read
+   *  right now (the client should retry; its refresh token is kept). Absent →
+   *  always "ok". */
+  private readonly refreshCheck?: (c: { client_id: string; client_name?: string; ip?: string }) => RefreshDecision;
 
   constructor(
     store: OAuthStore,
@@ -228,6 +237,7 @@ export class OAuthHandlers {
     ipExtractor?: (req: IncomingMessage) => string,
     verifyClientCredentials?: (clientId: string, secret: string) => boolean,
     onAuthorizationCodeExchanged?: (c: { client_id: string; client_name?: string; ip?: string }) => void,
+    refreshCheck?: (c: { client_id: string; client_name?: string; ip?: string }) => RefreshDecision,
   ) {
     this.store = store;
     this.cfg = cfg;
@@ -236,6 +246,7 @@ export class OAuthHandlers {
     this.ipExtractor = ipExtractor;
     this.verifyClientCredentials = verifyClientCredentials;
     this.onAuthorizationCodeExchanged = onAuthorizationCodeExchanged;
+    this.refreshCheck = refreshCheck;
     // Authorize is always automatic-consent (there is no admin password): the
     // per-agent grant Approve/Deny is the only human gate (see handleAuthorizeGet).
   }
@@ -279,7 +290,7 @@ export class OAuthHandlers {
       registration_endpoint: `${this.cfg.issuer}/oauth/register`,
       revocation_endpoint: `${this.cfg.issuer}/oauth/revoke`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "client_credentials"],
+      grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
       code_challenge_methods_supported: ["S256"],
       // "none" for the public authorization_code (PKCE) flow; basic/post for
       // service-account client_credentials login.
@@ -338,7 +349,7 @@ export class OAuthHandlers {
     const client = this.store.registerClient({
       client_name: sanitizedName,
       redirect_uris: uris,
-      grant_types: ["authorization_code"],
+      grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",      // Public client — PKCE is mandatory anyway
       scope: SCOPES.join(" "),
@@ -438,8 +449,11 @@ export class OAuthHandlers {
     if (grantType === "client_credentials") {
       return this.handleClientCredentials(req, res, body);
     }
+    if (grantType === "refresh_token") {
+      return this.handleRefreshToken(req, res, body);
+    }
     if (grantType !== "authorization_code") {
-      error(res, 400, "unsupported_grant_type", `Supported grant types: authorization_code, client_credentials; got ${grantType}.`);
+      error(res, 400, "unsupported_grant_type", `Supported grant types: authorization_code, refresh_token, client_credentials; got ${grantType}.`);
       return { handled: true };
     }
 
@@ -490,12 +504,85 @@ export class OAuthHandlers {
       scopes: auth.scopes,
       resource: auth.resource ?? resource,
     });
+    // A refresh token lets the host renew silently when the access token
+    // lapses, instead of asking the user to reconnect every 24 h.
+    const refreshToken = this.store.issueRefreshToken({
+      clientId: issued.clientId,
+      scopes: issued.scopes,
+      resource: issued.resource,
+    });
 
     json(res, 200, {
       access_token: issued.token,
       token_type: "Bearer",
       expires_in: Math.floor((issued.expiresAt - Date.now()) / 1000),
+      refresh_token: refreshToken,
       scope: issued.scopes.join(" "),
+    });
+    return { handled: true };
+  }
+
+  /**
+   * RFC 6749 §6 refresh. Public clients (token_endpoint_auth_method "none")
+   * identify with client_id; the refresh token itself is the credential and
+   * is bound to that client. Rotation (OAuth 2.1 §4.3.1) issues a successor
+   * every time; the old one survives a short grace so a retried request
+   * doesn't strand the host. Every failure is the same opaque invalid_grant.
+   */
+  private async handleRefreshToken(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: Record<string, string>,
+  ): Promise<OAuthHandlerResult> {
+    const presented = body.refresh_token ?? "";
+    const clientId = body.client_id || undefined;
+    const resource = body.resource || undefined;
+    const rec = this.store.peekRefreshToken(presented);
+    if (!rec || (clientId && clientId !== rec.clientId)
+      || (resource && rec.resource && normalizeResource(resource) !== rec.resource)) {
+      error(res, 400, "invalid_grant", "Invalid refresh token.");
+      return { handled: true };
+    }
+    // A narrower scope request is allowed; anything outside the original
+    // grant is not (RFC 6749 §6).
+    const requested = (body.scope ?? "").split(/\s+/).filter(Boolean);
+    if (requested.some(sc => !rec.scopes.includes(sc))) {
+      error(res, 400, "invalid_scope", "Requested scope exceeds the original grant.");
+      return { handled: true };
+    }
+
+    let decision: RefreshDecision = "ok";
+    try {
+      decision = this.refreshCheck?.({
+        client_id: rec.clientId,
+        client_name: this.store.getClient(rec.clientId)?.client_name,
+        ip: this.ipExtractor?.(req),
+      }) ?? "ok";
+    } catch (hookErr) {
+      logger.warn("refreshCheck hook threw; asking the client to retry", "OAuth", hookErr);
+      decision = "unavailable";
+    }
+    if (decision === "unavailable") {
+      error(res, 503, "temporarily_unavailable", "Authorization state is temporarily unavailable; retry shortly.");
+      return { handled: true };
+    }
+    if (decision === "denied") {
+      this.store.revokeTokensForClient(rec.clientId);
+      error(res, 400, "invalid_grant", "Invalid refresh token.");
+      return { handled: true };
+    }
+
+    const rotated = this.store.rotateRefreshToken(presented, rec.clientId);
+    if (!rotated) {
+      error(res, 400, "invalid_grant", "Invalid refresh token.");
+      return { handled: true };
+    }
+    json(res, 200, {
+      access_token: rotated.access.token,
+      token_type: "Bearer",
+      expires_in: Math.floor((rotated.access.expiresAt - Date.now()) / 1000),
+      refresh_token: rotated.refreshToken,
+      scope: rotated.access.scopes.join(" "),
     });
     return { handled: true };
   }

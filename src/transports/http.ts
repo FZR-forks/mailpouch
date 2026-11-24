@@ -37,7 +37,7 @@ import { createHash, randomUUID } from "crypto";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { logger } from "../utils/logger.js";
 import { OAuthStore } from "./oauth-store.js";
-import { OAuthHandlers } from "./oauth-handlers.js";
+import { OAuthHandlers, type RefreshDecision } from "./oauth-handlers.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
 import { grantHasExpired, isServiceAccountGrant, type AgentGrantStore } from "../agents/grant-store.js";
 import type { ServiceAccountStore } from "../agents/service-account-store.js";
@@ -318,6 +318,24 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         else opts.agentGrants!.createPending(args);
       }
     : undefined;
+  // A refresh renews an existing session, so it follows the same grant rules
+  // as the bearer gate: revoked/expired clients are refused (and lose their
+  // refresh tokens), unreadable grant storage asks the client to retry rather
+  // than killing the session, and a missing or pending grant gets the same
+  // recovery as a fresh sign-in.
+  const refreshCheck = opts.agentGrants
+    ? (c: { client_id: string; client_name?: string; ip?: string }): RefreshDecision => {
+        const snapshot = opts.agentGrants!.getAuthorizationSnapshot(c.client_id);
+        if (snapshot.kind === "unavailable") return "unavailable";
+        const grant = snapshot.kind === "present" ? snapshot.grant : undefined;
+        if (grant && (grant.status === "revoked" || grant.status === "expired"
+          || (grant.status !== "pending" && grantHasExpired(grant)))) {
+          return "denied";
+        }
+        if (!grant || grant.status === "pending") ensureClientGrant?.(c);
+        return "ok";
+      }
+    : undefined;
   const oauthHandlers = opts.oauthEnabled
     ? new OAuthHandlers(
         oauthStore,
@@ -344,6 +362,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
             }
           : undefined,
         ensureClientGrant,
+        refreshCheck,
       )
     : null;
 
@@ -492,6 +511,9 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     }
 
     if (!ok || !tokenKey) {
+      // Logged so an expired/unknown bearer (the host should refresh) is
+      // distinguishable from a revoked grant when diagnosing reconnect loops.
+      if (token) logger.info("Rejected an expired or unknown OAuth bearer token (401)", "HTTPTransport");
       res.statusCode = 401;
       res.setHeader("WWW-Authenticate",
         oauthHandlers

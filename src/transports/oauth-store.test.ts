@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { OAuthStore, OAUTH_CODE_TTL_MS, OAUTH_ACCESS_TOKEN_TTL_MS } from "./oauth-store.js";
+import { OAuthStore, OAUTH_CODE_TTL_MS, OAUTH_ACCESS_TOKEN_TTL_MS, OAUTH_REFRESH_TOKEN_TTL_MS, OAUTH_REFRESH_ROTATION_GRACE_MS } from "./oauth-store.js";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -150,7 +150,7 @@ describe("OAuthStore", () => {
       store.issueToken({ clientId: "c", scopes: [] });
       store.issueAuthCode({ clientId: "c", redirectUri: "http://x/cb", codeChallenge: "x", codeChallengeMethod: "S256", scopes: [] });
       const s = store.stats();
-      expect(s).toEqual({ clients: 1, codes: 1, tokens: 1 });
+      expect(s).toEqual({ clients: 1, codes: 1, tokens: 1, refreshTokens: 0 });
     });
   });
 
@@ -276,6 +276,90 @@ describe("OAuthStore", () => {
       a.revokeToken(t.token);
       const b = new OAuthStore(path);
       expect(b.verifyToken(t.token)).toBeNull();
+    });
+  });
+
+  describe("refresh tokens", () => {
+    const args = { clientId: "pmc_refresh", scopes: ["mcp:full"], resource: "https://mail.example/mcp" };
+
+    it("rotates into a new access token and successor bound to the same client and resource", () => {
+      const rt = store.issueRefreshToken(args);
+      const rotated = store.rotateRefreshToken(rt, args.clientId);
+      expect(rotated).not.toBeNull();
+      expect(rotated!.refreshToken).not.toBe(rt);
+      expect(store.verifyToken(rotated!.access.token)).toMatchObject({ clientId: args.clientId, resource: args.resource, scopes: ["mcp:full"] });
+      expect(store.rotateRefreshToken(rotated!.refreshToken, args.clientId)).not.toBeNull();
+    });
+
+    it("rejects a refresh token presented by another client", () => {
+      const rt = store.issueRefreshToken(args);
+      expect(store.rotateRefreshToken(rt, "pmc_other")).toBeNull();
+      expect(store.rotateRefreshToken(rt, args.clientId)).not.toBeNull();
+    });
+
+    it("keeps a rotated token usable only within the retry grace", () => {
+      vi.useFakeTimers();
+      const rt = store.issueRefreshToken(args);
+      expect(store.rotateRefreshToken(rt)).not.toBeNull();
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_ROTATION_GRACE_MS - 1000);
+      expect(store.rotateRefreshToken(rt)).not.toBeNull(); // lost-response retry
+      vi.setSystemTime(Date.now() + 2000);
+      expect(store.rotateRefreshToken(rt)).toBeNull();
+    });
+
+    it("expires after the idle TTL, and each rotation slides the window", () => {
+      vi.useFakeTimers();
+      const rt = store.issueRefreshToken(args);
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_TOKEN_TTL_MS - 1000);
+      const next = store.rotateRefreshToken(rt)!.refreshToken;
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_TOKEN_TTL_MS - 1000);
+      expect(store.rotateRefreshToken(next)).not.toBeNull();
+      const idle = store.issueRefreshToken(args);
+      vi.setSystemTime(Date.now() + OAUTH_REFRESH_TOKEN_TTL_MS + 1000);
+      expect(store.rotateRefreshToken(idle)).toBeNull();
+    });
+
+    it("revokeTokensForClient drops refresh tokens too", () => {
+      const rt = store.issueRefreshToken(args);
+      store.issueToken(args);
+      expect(store.revokeTokensForClient(args.clientId)).toBe(2);
+      expect(store.rotateRefreshToken(rt)).toBeNull();
+    });
+
+    it("revokeToken (RFC 7009) accepts a refresh token", () => {
+      const rt = store.issueRefreshToken(args);
+      expect(store.revokeToken(rt)).toBe(true);
+      expect(store.peekRefreshToken(rt)).toBeNull();
+    });
+
+    describe("persistence", () => {
+      let dir: string;
+      let path: string;
+      beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "mp-oauth-rt-")); path = join(dir, "tokens.json"); });
+      afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+      it("survives a restart and stores only the hash", () => {
+        const a = new OAuthStore(path);
+        const rt = a.issueRefreshToken(args);
+        expect(readFileSync(path, "utf-8")).not.toContain(rt);
+        const b = new OAuthStore(path);
+        expect(b.rotateRefreshToken(rt, args.clientId)).not.toBeNull();
+      });
+
+      it("keeps a client registered before refresh support, and one registered after", () => {
+        const a = new OAuthStore(path);
+        const legacy = a.registerClient({ redirect_uris: ["https://h.example/cb"], grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none" });
+        const modern = a.registerClient({ redirect_uris: ["https://h.example/cb"], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" });
+        const b = new OAuthStore(path);
+        expect(b.getClient(legacy.client_id)).toBeDefined();
+        expect(b.getClient(modern.client_id)).toBeDefined();
+      });
+
+      it("loads a version-2 file without refresh tokens", () => {
+        writeFileSync(path, JSON.stringify({ version: 2, clients: [], tokens: [] }));
+        const b = new OAuthStore(path);
+        expect(b.stats().refreshTokens).toBe(0);
+      });
     });
   });
 
