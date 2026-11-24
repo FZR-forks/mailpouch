@@ -21,6 +21,7 @@ FROM ${NODE_IMAGE}
 ENV NODE_ENV=production \
     HOME=/data \
     MAILPOUCH_BRIDGE_HOST=protonmail-bridge \
+    MAILPOUCH_BRIDGE_GRPC_CONFIG=/run/mailpouch-bridge/grpcServerConfig.json \
     MAILPOUCH_PORT=8788
 WORKDIR /app
 COPY --from=build /app/package.json ./

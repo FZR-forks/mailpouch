@@ -111,6 +111,18 @@ after 90 days without use, and `mailpouch agent revoke` invalidates it
 immediately. Apps connected before refresh-token support have none, so
 reconnect them once after upgrading.
 
+## Sender addresses
+
+Bridge runs with its gRPC service on (the API Proton's desktop app uses), so
+MailPouch can show agents the Proton account's real sender addresses on the
+`from` field of the sending tools. `docker/bridge-grpc.sh` does this around the
+image's own entrypoint: only the final command changes, from
+`--noninteractive` to `--grpc`, and `init` works as before. Bridge's socket and
+its access token are shared with MailPouch through the `bridge-grpc` volume,
+owned by MailPouch's user (`1000:1000`); nothing else from the `bridge` volume
+is shared. New addresses you add in Proton appear within a minute. See
+[sender addresses](sender-addresses.md) for details.
+
 ## Exposing MailPouch beyond the server
 
 The daemon speaks plain HTTP. Keep `MAILPOUCH_BIND=127.0.0.1` and either reach

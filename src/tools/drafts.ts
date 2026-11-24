@@ -9,6 +9,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { isValidEmail, optionalFolderHint, requireNumericEmailId, validateAttachments, sanitizeAttachments } from "../utils/helpers.js";
 import type { EmailMessage } from "../types/index.js";
 import type { ToolDef, ToolHandler } from "./types.js";
+import { FROM_SCHEMA_FIELD, resolveSenderAddress } from "./sender.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -148,7 +149,7 @@ export const defs: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string", description: "Sender address owned by this Proton account (optional)." },
+        from: FROM_SCHEMA_FIELD,
         to: { type: "string", description: "Recipient address(es), comma-separated" },
         subject: { type: "string", description: "Email subject line" },
         body: { type: "string", description: "Email body (plain text or HTML)" },
@@ -429,9 +430,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.bcc !== undefined && typeof args.bcc !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
     }
-    if (args.from !== undefined && (typeof args.from !== "string" || !isValidEmail(args.from))) {
-      throw new McpError(ErrorCode.InvalidParams, "'from' must be a valid email address.");
-    }
+    const from = await resolveSenderAddress(ctx);
     if (!args.send_at || typeof args.send_at !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'send_at' is required and must be an ISO 8601 date-time string.");
     }
@@ -441,7 +440,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     try {
       const scheduled: Parameters<typeof schedulerService.schedule>[0] = {
-        from: args.from as string | undefined,
+        from,
         to: args.to as string,
         cc: args.cc as string | undefined,
         bcc: args.bcc as string | undefined,
