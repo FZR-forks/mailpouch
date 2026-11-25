@@ -1170,7 +1170,7 @@ export class SimpleIMAPService {
         // including all attachment binaries just to render a 300-char preview.
         const query: FetchQueryObject = {
           uid: true, flags: true, envelope: true, bodyStructure: true, bodyParts: ['1'],
-          ...(scope ? { headers: ['x-pm-internal-id'] } : {}),
+          headers: scope ? ['x-pm-internal-id', 'references'] : ['references'],
         };
         const stream = visible
           ? this.client.fetch(visible.slice(start - 1, end).join(","), query, { uid: true })
@@ -1233,6 +1233,9 @@ export class SimpleIMAPService {
               folder,
               // #9: stable cross-folder identity (the `id` UID is per-folder).
               messageId: env.messageId || undefined,
+              inReplyTo: env.inReplyTo || undefined,
+              references: /^references:(.*(?:\r?\n[ \t].*)*)/im.exec(message.headers?.toString('utf8') ?? '')?.[1]
+                ?.match(/<[^<>\s]+>/g) ?? undefined,
               isRead: message.flags?.has('\\Seen') ?? false,
               isStarred: message.flags?.has('\\Flagged') ?? false,
               hasAttachment: attachmentCount > 0,

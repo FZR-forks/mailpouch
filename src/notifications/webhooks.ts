@@ -266,6 +266,13 @@ function sign(body: string, secret: string): string {
   return `sha256=${mac}`;
 }
 
+/** One HTTP reply; `body` holds at most the bytes the caller asked to read. */
+export interface PostResult {
+  status: number;
+  ok: boolean;
+  body: string;
+}
+
 export interface DeliveryResult {
   endpointId: string;
   url: string;
@@ -371,7 +378,8 @@ export class WebhookDispatcher {
     headers: Record<string, string>,
     body: string,
     timeoutMs: number,
-  ): Promise<Response> {
+    maxResponseBytes: number,
+  ): Promise<PostResult> {
     if (!this.fetcher) throw new Error("fetcher_unavailable");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -386,9 +394,10 @@ export class WebhookDispatcher {
         signal: controller.signal,
       });
       // Test/custom fetch adapters receive the same bounded-response policy
-      // as the core path: response content is never part of webhook delivery.
-      void response.body?.cancel().catch(() => undefined);
-      return response;
+      // as the core path.
+      const text = maxResponseBytes > 0 ? (await response.text()).slice(0, maxResponseBytes) : "";
+      if (maxResponseBytes <= 0) void response.body?.cancel().catch(() => undefined);
+      return { status: response.status, ok: response.ok, body: text };
     } catch (err) {
       if (controller.signal.aborted) throw new Error("attempt_timeout");
       throw err;
@@ -408,7 +417,8 @@ export class WebhookDispatcher {
     headers: Record<string, string>,
     body: string,
     timeoutMs: number,
-  ): Promise<Pick<Response, "status" | "ok">> {
+    maxResponseBytes: number,
+  ): Promise<PostResult> {
     const hostname = normalizeHostname(url.hostname);
     const path = `${url.pathname || "/"}${url.search}`;
     const port = url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
@@ -439,11 +449,18 @@ export class WebhookDispatcher {
       };
       const onResponse = (response: import("http").IncomingMessage) => {
         const status = response.statusCode ?? 0;
-        // Never parse endpoint-controlled response bytes. Destroy the stream
-        // at headers, giving response handling a zero-byte upper bound.
+        // Read at most maxResponseBytes of endpoint-controlled bytes (none by
+        // default), then destroy the stream.
         response.on("error", () => undefined);
-        response.destroy();
-        settle(() => resolve({ status, ok: status >= 200 && status < 300 }));
+        let text = "";
+        const done = () => {
+          response.destroy();
+          settle(() => resolve({ status, ok: status >= 200 && status < 300, body: text.slice(0, maxResponseBytes) }));
+        };
+        if (maxResponseBytes <= 0) return done();
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => { text += chunk; if (text.length >= maxResponseBytes) done(); });
+        response.on("end", done);
       };
       const request: ClientRequest = isTls
         ? httpsRequest(options, onResponse)
@@ -465,10 +482,26 @@ export class WebhookDispatcher {
     headers: Record<string, string>,
     body: string,
     timeoutMs: number,
-  ): Promise<Pick<Response, "status" | "ok">> {
+    maxResponseBytes = 0,
+  ): Promise<PostResult> {
     return this.fetcher
-      ? this.postWithFetchTimeout(url.toString(), headers, body, timeoutMs)
-      : this.postToPinnedAddress(url, target, headers, body, timeoutMs);
+      ? this.postWithFetchTimeout(url.toString(), headers, body, timeoutMs, maxResponseBytes)
+      : this.postToPinnedAddress(url, target, headers, body, timeoutMs, maxResponseBytes);
+  }
+
+  /**
+   * One POST, without redirects, to an address that passes the same checks as
+   * `deliver`, for callers that sign and retry themselves. Rejects when the
+   * target is refused or unreachable; reads up to `maxResponseBytes` of the reply.
+   */
+  async post(rawUrl: string, headers: Record<string, string>, body: string, maxResponseBytes = 0): Promise<PostResult> {
+    const url = parseWebhookUrl(rawUrl);
+    if (!url || (!this.allowPrivateTargets && isPrivateWebhookTarget(rawUrl))) throw new Error("invalid_target_rejected");
+    const deadline = Date.now() + this.attemptTimeoutMs;
+    const [target] = await this.resolveTarget(url, this.attemptTimeoutMs);
+    const timeoutMs = deadline - Date.now();
+    if (timeoutMs <= 0) throw new Error("attempt_timeout");
+    return this.postWithTimeout(url, target, { ...headers, "Content-Length": String(Buffer.byteLength(body)) }, body, timeoutMs, maxResponseBytes);
   }
 
   /**

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New-mail MCP events for ChatGPT and other clients of the MCP Events draft: `email.received` (any new Inbox message the agent may read) and `email.reply_received` (a new message in the thread of a given `messageId`), delivered over signed webhooks (Standard Webhooks) after a callback challenge. Events follow the agent's grant and the access label; subscriptions persist across restarts. HTTP transport only.
 - Sender addresses come from Proton Bridge itself. MailPouch reads the account's enabled addresses from Bridge's local gRPC service (`GetUserList`) and lists them on the `from` field of `send_email`, `reply_to_email`, `forward_email`, and `schedule_email` (also as schema `examples` for single-account setups; shown only to agents allowed to send from the account). A `from` the account cannot send from is refused with the list of valid addresses, after re-checking a fresh list; reply-all also leaves every own address out of CC. Works with the Bridge desktop app as is; `compose.yaml` now runs Bridge with its gRPC service and shares only its socket and token with MailPouch. `MAILPOUCH_BRIDGE_GRPC_CONFIG` overrides the config path or turns discovery off.
 
 ## [4.0.5] — 2026-10-13
