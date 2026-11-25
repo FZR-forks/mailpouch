@@ -21,8 +21,6 @@ const DAY_MS = 86_400_000;
 const MIN_TTL_MS = 60_000;
 const POLL_MS = 30_000;
 const RETRY_DELAYS_MS = [10_000, 60_000, 300_000];
-/** Remembered Message-IDs; past this the set restarts from the current Inbox page. */
-const MAX_SEEN = 1_000;
 const FORBIDDEN = -32024;
 const CALLBACK_ENDPOINT_ERROR = -32015;
 
@@ -114,8 +112,8 @@ export class MailEvents {
   private readonly subs = new Map<string, Subscription>();
   /** Callback URLs verified per client, until the stored time. */
   private readonly verified = new Map<string, number>();
-  /** Inbox messages already seen; unset until the first poll takes a baseline. */
-  private seen?: Set<string>;
+  /** Highest Inbox UID already handled; unset until the first poll takes a baseline. */
+  private lastUid?: number;
   private polling = false;
   private timer?: ReturnType<typeof setInterval>;
   private readonly webhooks: WebhookDispatcher;
@@ -167,7 +165,7 @@ export class MailEvents {
     this.subs.set(id, sub);
     this.save();
     // Take the Inbox baseline now, so mail arriving from here on counts as new.
-    if (!this.seen) void this.poll();
+    if (this.lastUid === undefined) void this.poll();
     return { id, refreshBefore: new Date(sub.expiresAt).toISOString(), cursor: null, truncated: false };
   }
 
@@ -181,13 +179,14 @@ export class MailEvents {
       for (const sub of expired) this.subs.delete(sub.id);
       if (expired.length) this.save();
       if (!this.subs.size) {
-        this.seen = undefined;
+        this.lastUid = undefined;
         return;
       }
+      // UIDs only grow, so mail moved out of the Inbox never makes older mail look new.
       const emails = await this.deps.readInbox();
-      const fresh = this.seen ? emails.filter(email => !this.seen!.has(emailKey(email))) : [];
-      if (!this.seen || this.seen.size > MAX_SEEN) this.seen = new Set();
-      for (const email of emails) this.seen.add(emailKey(email));
+      const last = this.lastUid;
+      const fresh = last === undefined ? [] : emails.filter(email => Number(email.id) > last);
+      this.lastUid = Math.max(last ?? 0, ...emails.map(email => Number(email.id)));
       for (const email of fresh.reverse()) {
         for (const sub of this.subs.values()) {
           if (EVENTS[sub.name]?.matches(email, sub.args) && this.deps.mayRead(sub.clientId)) void this.deliver(sub.id, email);
@@ -260,9 +259,9 @@ export class MailEvents {
       cursor: null,
     });
     for (let attempt = 0; ; attempt++) {
-      // Refreshes may change the secret; an unsubscribe ends the retries.
+      // Refreshes may change the secret; an unsubscribe, expiry or lost access ends the retries.
       const sub = this.subs.get(subId);
-      if (!sub) return;
+      if (!sub || sub.expiresAt <= Date.now() || !this.deps.mayRead(sub.clientId)) return;
       const status = await this.post(sub, eventId, body).then(res => res.status, () => 0);
       if (status >= 200 && status < 300) return;
       if (status === 410) {

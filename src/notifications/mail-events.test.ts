@@ -131,6 +131,16 @@ describe("MailEvents", () => {
     expect(sent.filter(s => !s.body.type)).toHaveLength(3);
   });
 
+  it("does not treat older mail as new when newer mail leaves the inbox", async () => {
+    const { events, sent, state } = harness({ inbox: [email("5"), email("4")] });
+    await subscribe(events, "email.received");
+    await events.poll();
+    state.inbox = [email("4"), email("3")]; // 5 archived; 3 slides into the page
+    await events.poll();
+    await settle();
+    expect(sent.filter(s => !s.body.type)).toHaveLength(0);
+  });
+
   it("stops sending once the agent loses access", async () => {
     const { events, sent, state } = harness();
     await subscribe(events, "email.received");
