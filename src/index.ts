@@ -383,13 +383,15 @@ const mailEvents = new MailEvents({
   readInbox: () => labelScopedImap(accountManager.getActive().imap, currentAccessLabelFolder()).getEmails("INBOX", 20),
   mayRead: (clientId) => {
     const accountId = accountManager.activeAccountId();
-    return permissions.check("get_emails").allowed && grantManager.check({
+    const cfg = loadConfig() ?? defaultConfig();
+    // The enabled flag, not permissions.check(), which spends a rate-limit slot.
+    return cfg.permissions.tools?.get_emails?.enabled === true && grantManager.check({
       clientId,
       tool: "get_emails",
       args: { folder: "INBOX" },
       targetAccountId: accountId,
       targetAccountIdentity: accountManager.identityForAccount(accountId),
-      globalPreset: (loadConfig() ?? defaultConfig()).permissions.preset,
+      globalPreset: cfg.permissions.preset,
     }, { reserveHourlyToolSlot: false }).allowed;
   },
 });

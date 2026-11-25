@@ -164,8 +164,8 @@ export class MailEvents {
     await this.verify(sub);
     this.subs.set(id, sub);
     this.save();
-    // Take the Inbox baseline now, so mail arriving from here on counts as new.
-    if (this.lastUid === undefined) void this.poll();
+    // Take the Inbox baseline before confirming, so mail sent from here on counts as new.
+    if (this.lastUid === undefined) await this.poll();
     return { id, refreshBefore: new Date(sub.expiresAt).toISOString(), cursor: null, truncated: false };
   }
 
