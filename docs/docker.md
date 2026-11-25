@@ -123,6 +123,19 @@ owned by MailPouch's user (`1000:1000`); nothing else from the `bridge` volume
 is shared. New addresses you add in Proton appear within a minute. See
 [sender addresses](sender-addresses.md) for details.
 
+## New-mail events
+
+Over HTTP, MailPouch offers two [MCP events](https://developers.openai.com/plugins/build/mcp-events)
+with webhook delivery: `email.received` for any new Inbox message the agent
+may read, and `email.reply_received` for a new message in the thread of a
+`messageId` (as `send_email` or `reply_to_email` return it). ChatGPT can then
+act on mail as it arrives, for example in a dot. MailPouch checks the Inbox
+every 30 seconds while subscriptions exist, applies the agent's grant and the
+access label to every event, and sends each one straight to the HTTPS
+callback the client registered, so the container needs outbound internet.
+Subscriptions last up to a day per refresh and survive restarts; mail that
+arrives while MailPouch is down is not sent.
+
 ## Exposing MailPouch beyond the server
 
 The daemon speaks plain HTTP. Keep `MAILPOUCH_BIND=127.0.0.1` and either reach

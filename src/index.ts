@@ -38,6 +38,8 @@ import {
   GetPromptRequestSchema,
   McpError,
   ErrorCode,
+  type ServerCapabilities,
+  type ServerResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { ProtonMailConfig, EmailMessage } from "./types/index.js";
@@ -77,6 +79,7 @@ import { AccountManager, registerAccountManager, type AccountServices, type Acco
 import { DesktopNotifier } from "./notifications/desktop.js";
 import { DesktopPrompt } from "./notifications/desktop-prompt.js";
 import { WebhookDispatcher } from "./notifications/webhooks.js";
+import { MailEvents } from "./notifications/mail-events.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lock.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
@@ -372,6 +375,26 @@ for (const acct of serviceAccounts.list()) {
   });
 }
 registerAgentServices(agentGrants, agentAudit, serviceAccounts);
+
+// MCP Events (HTTP only): new Inbox mail for subscribed agents, with the same
+// access label and get_emails permission their tool calls have.
+const mailEvents = new MailEvents({
+  path: profileRuntimeFile("MAILPOUCH_EVENT_SUBSCRIPTIONS", ".mailpouch-event-subscriptions.json"),
+  readInbox: () => labelScopedImap(accountManager.getActive().imap, currentAccessLabelFolder()).getEmails("INBOX", 20),
+  mayRead: (clientId) => {
+    const accountId = accountManager.activeAccountId();
+    const cfg = loadConfig() ?? defaultConfig();
+    // The enabled flag, not permissions.check(), which spends a rate-limit slot.
+    return cfg.permissions.tools?.get_emails?.enabled === true && grantManager.check({
+      clientId,
+      tool: "get_emails",
+      args: { folder: "INBOX" },
+      targetAccountId: accountId,
+      targetAccountIdentity: accountManager.identityForAccount(accountId),
+      globalPreset: cfg.permissions.preset,
+    }, { reserveHourlyToolSlot: false }).allowed;
+  },
+});
 
 // ─── Notification channels (B2) ──────────────────────────────────────────────
 // Subscribe an OS desktop notifier and an outbound webhook dispatcher to the
@@ -2220,10 +2243,15 @@ export function createSessionServer(): Server {
         tools: { listChanged: false },
         resources: { listChanged: false, subscribe: false },
         prompts: { listChanged: false },
-      },
+        events: {},
+      } as ServerCapabilities,
       instructions: SERVER_INSTRUCTIONS,
     },
   );
+  // events/list, events/subscribe and events/unsubscribe (the SDK has no
+  // handlers for them); every other unknown method stays "not found".
+  s.fallbackRequestHandler = async (request) =>
+    mailEvents.handle(request.method, request.params, currentCaller()?.clientId) as Promise<ServerResult>;
   // Capture the MCP handshake's connection info onto this agent's grant for
   // display in the Agents tab. The `initialize` request runs inside
   // runWithCaller(), so currentCaller() yields the session's OAuth clientId
@@ -3554,6 +3582,7 @@ async function main() {
       // As in startHttpTransport: the issuer value is not interpolated into the
       // message, which is the one argument log() cannot redact.
       logger.info(`mailpouch started on HTTP transport at ${handle.url}${handle.issuer ? " (OAuth enabled)" : ""}`, "MCPServer");
+      mailEvents.start();
       (globalThis as unknown as { __mailpouchHttpHandle?: { close(): Promise<void> } }).__mailpouchHttpHandle = handle;
     } else {
       const transport = new StdioServerTransport();
